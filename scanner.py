@@ -6,8 +6,8 @@ Skipped files (DVD, already-AV1, unreadable) are logged to skipped_files.txt.
 """
 
 import json
+import os
 import subprocess
-import sys
 from pathlib import Path
 from typing import Optional
 
@@ -61,18 +61,23 @@ def scan(dry_run: bool = False) -> None:
 
     counts = {"pending": 0, "skipped": 0, "ignored": 0, "error": 0}
     skipped_lines: list[str] = []
+    total_files = 0
 
     print(f"Scanning {config.MOVIES_DIR} …")
 
-    for path in sorted(config.MOVIES_DIR.rglob("*")):
+    for dirpath, _dirs, filenames in os.walk(config.MOVIES_DIR):
+      for filename in filenames:
+        path = Path(dirpath) / filename
         if not path.is_file():
             continue
 
+        total_files += 1
         suffix = path.suffix.lower()
 
         # ── Completely ignore non-video support files ──────────────────────
         if suffix in config.IGNORE_EXTENSIONS:
             counts["ignored"] += 1
+            _print_progress(total_files, counts, path.name)
             continue
 
         # ── DVD structure files — skip + log ──────────────────────────────
@@ -84,24 +89,28 @@ def scan(dry_run: bool = False) -> None:
             }.get(suffix, "DVD-related file")
             _record_skip(path, reason, skipped_lines, dry_run)
             counts["skipped"] += 1
+            _print_progress(total_files, counts, path.name)
             continue
 
         # ── Video files to convert ─────────────────────────────────────────
         if suffix in config.CONVERT_EXTENSIONS:
             _process_video(path, skipped_lines, counts, dry_run)
+            _print_progress(total_files, counts, path.name)
             continue
 
         # ── Unknown extension — log as skipped ────────────────────────────
         reason = f"Unknown extension '{suffix}'"
         _record_skip(path, reason, skipped_lines, dry_run)
         counts["skipped"] += 1
+        _print_progress(total_files, counts, path.name)
 
     # ── Write skipped report ───────────────────────────────────────────────
     if not dry_run and skipped_lines:
         _write_skipped_report(skipped_lines)
 
     # ── Summary ───────────────────────────────────────────────────────────
-    print(f"\nScan complete:")
+    print(f"\r{' ' * 100}\r", end="")   # clear the progress line
+    print(f"Scan complete:")
     print(f"  Queued for conversion : {counts['pending']}")
     print(f"  Skipped               : {counts['skipped']}")
     print(f"  Ignored (non-video)   : {counts['ignored']}")
@@ -228,6 +237,17 @@ def _write_scan_summary(counts: dict) -> None:
             f.write(f"  {row['ext']:10s}  {row['n']:4d} files\n")
 
     print(f"Scan summary written to {out}")
+
+
+def _print_progress(total: int, counts: dict, current_name: str) -> None:
+    name = current_name[:40].ljust(40)
+    line = (f"  [{total:4d} files]  "
+            f"queued={counts['pending']}  "
+            f"skipped={counts['skipped']}  "
+            f"ignored={counts['ignored']}  "
+            f"errors={counts['error']}  "
+            f"  {name}")
+    print(f"\r{line}", end="", flush=True)
 
 
 def _human(size: int) -> str:

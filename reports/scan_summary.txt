@@ -1,0 +1,47 @@
+# Scan Summary
+
+Queued for conversion : 639
+Skipped               : 58
+Ignored (non-video)   : 216
+Unreadable / errors   : 1
+
+## Source codec breakdown
+  h264                   484 files  1.0 TB
+  mpeg4                   98 files  106.0 GB
+  hevc                    49 files  139.1 GB
+  msmpeg4v3                5 files  2.7 GB
+  vp9                      1 files  478.7 MB
+  vp8                      1 files  451.7 MB
+  rv40                     1 files  1012.7 MB
+
+## Source extension breakdown
+  .mp4         278 files
+  .mkv         240 files
+  .avi          91 files
+  .madness.1     2 files
+  .m4v           2 files
+  .1/the twi     2 files
+  .third) (2     1 files
+  .sex.2008.     1 files
+  .s. i love     1 files
+  .rmvb/kick     1 files
+  .org]_gobl     1 files
+  .no (1962)     1 files
+  .n0vyh.sv1     1 files
+  .divx          1 files
+  .46_2c.avi     1 files
+  .46_1c.avi     1 files
+  .1] 2_conv     1 files
+  .1] 2.mp4      1 files
+  .1] 1_conv     1 files
+  .1] 1.mp4      1 files
+  .1/surroga     1 files
+  .1/spider-     1 files
+  .1/ready p     1 files
+  .1/lucy (2     1 files
+  .1 tigole)     1 files
+  ..mkv          1 files
+  . destiny      1 files
+  . 9 (1992)     1 files
+  . 2 (2017)     1 files
+  . 1 (2014)     1 files

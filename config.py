@@ -37,7 +37,7 @@ DVD_EXTENSIONS  = {".vob", ".ifo", ".bup"}
 
 # Completely ignored (not video, no logging needed)
 IGNORE_EXTENSIONS = {".vsmeta", ".db", ".jpg", ".jpeg", ".png", ".nfo",
-                     ".txt", ".srt", ".idx", ".sub", ".ds_store"}
+                     ".txt", ".srt", ".idx", ".sub", ".ds_store", ""}
 
 # ── Subtitle codec transcoding map ────────────────────────────────────────────
 # Codecs that cannot be stream-copied into MKV and must be transcoded.
