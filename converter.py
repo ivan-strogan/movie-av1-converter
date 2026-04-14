@@ -69,23 +69,30 @@ def convert(row, dry_run: bool = False) -> bool:
     log_path = _log_path(input_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
+    duration_secs = float(row["duration_secs"] or 0)
+
     try:
         with open(log_path, "w", encoding="utf-8") as log_fh:
             log_fh.write("# Command:\n# " + " ".join(_quote(c) for c in cmd) + "\n\n")
             log_fh.flush()
 
-            proc = subprocess.run(
+            proc = subprocess.Popen(
                 cmd,
-                stdout=subprocess.PIPE,
-                stderr=log_fh,
-                # ffmpeg writes progress to stderr; we capture stdout silently
+                stdout=subprocess.PIPE,   # progress lines from -progress pipe:1
+                stderr=log_fh,            # warnings/errors go to log
+                text=True,
             )
+
+            _run_with_progress(proc, duration_secs)
 
         if proc.returncode != 0:
             _cleanup_tmp(tmp_path)
             error = f"ffmpeg exited with code {proc.returncode} — see {log_path}"
             db.mark_failed(input_path, error)
             return False
+
+        # Clear progress line before caller prints result
+        print(f"\r{' ' * 80}\r", end="", flush=True)
 
         # Atomic rename: tmp → final
         tmp_path.rename(output_path)
@@ -108,7 +115,7 @@ def _build_command(
 ) -> list[str]:
 
     cmd = [config.FFMPEG_BIN, "-hide_banner", "-loglevel", "warning",
-           "-stats", "-i", str(input_path)]
+           "-progress", "pipe:1", "-nostats", "-i", str(input_path)]
 
     # Additional SRT inputs
     for srt_path, _ in external_srts:
@@ -257,6 +264,74 @@ def _ffprobe(path: Path) -> Optional[dict]:
         return data
     except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
         return None
+
+
+# ── Progress bar ─────────────────────────────────────────────────────────────
+
+def _run_with_progress(proc: subprocess.Popen, duration_secs: float) -> None:
+    """
+    Read ffmpeg's -progress pipe:1 output and print a live progress bar.
+    Blocks until the process exits.
+    """
+    fields: dict[str, str] = {}
+
+    for line in proc.stdout:
+        line = line.strip()
+        if "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        fields[key] = val
+
+        if key == "progress":   # ffmpeg emits this at the end of each update block
+            _print_bar(fields, duration_secs)
+            fields = {}
+
+    proc.wait()
+
+
+def _print_bar(fields: dict, duration_secs: float) -> None:
+    out_time_us = int(fields.get("out_time_us", 0) or 0)
+    speed_str   = fields.get("speed", "").replace("x", "")
+    fps_str     = fields.get("fps", "0")
+
+    elapsed_secs = out_time_us / 1_000_000
+
+    if duration_secs > 0:
+        pct = min(elapsed_secs / duration_secs, 1.0)
+    else:
+        pct = 0.0
+
+    # Bar
+    bar_width = 28
+    filled = int(bar_width * pct)
+    bar = "█" * filled + "░" * (bar_width - filled)
+
+    # ETA
+    try:
+        speed = float(speed_str)
+    except (ValueError, TypeError):
+        speed = 0.0
+
+    if speed > 0 and duration_secs > 0:
+        remaining = (duration_secs - elapsed_secs) / speed
+        eta = f"ETA {_fmt_time(remaining)}"
+    else:
+        eta = "ETA --:--"
+
+    fps = fps_str if fps_str and fps_str != "0" else "?"
+    speed_label = f"{speed:.1f}x" if speed > 0 else "?x"
+
+    line = f"  [{bar}] {pct*100:5.1f}%  {eta}  {speed_label}  {fps} fps"
+    print(f"\r{line:<72}", end="", flush=True)
+
+
+def _fmt_time(secs: float) -> str:
+    secs = max(0, int(secs))
+    h, rem = divmod(secs, 3600)
+    m, s   = divmod(rem, 60)
+    if h:
+        return f"{h}h{m:02d}m{s:02d}s"
+    return f"{m:02d}m{s:02d}s"
 
 
 # ── Utilities ─────────────────────────────────────────────────────────────────

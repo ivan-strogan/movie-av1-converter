@@ -37,21 +37,36 @@ def cmd_convert(args) -> None:
     if reset:
         print(f"Re-queued {reset} interrupted job(s) from previous run.")
 
-    counts = db.get_status_counts()
-    total_pending = counts.get("pending", 0)
-
-    if total_pending == 0:
-        print("No pending jobs. Run 'python main.py scan' first.")
-        return
-
-    limit = args.limit
-    todo  = min(total_pending, limit) if limit else total_pending
-    print(f"Converting {todo} file(s)  (pending={total_pending})\n")
+    # ── --file: single specific file ──────────────────────────────────────
+    if args.file:
+        rows = db.get_pending_matching(args.file)
+        if not rows:
+            print(f"No pending file matching '{args.file}'. "
+                  f"Check the name or run 'python3 main.py status'.")
+            return
+        if len(rows) > 1:
+            print(f"Multiple matches for '{args.file}' — be more specific:\n")
+            for r in rows:
+                print(f"  {r['input_path']}")
+            return
+        rows_to_process = rows
+        todo = 1
+        print(f"Converting 1 file (matched '{args.file}')\n")
+    else:
+        counts = db.get_status_counts()
+        total_pending = counts.get("pending", 0)
+        if total_pending == 0:
+            print("No pending jobs. Run 'python3 main.py scan' first.")
+            return
+        limit = args.limit
+        todo  = min(total_pending, limit) if limit else total_pending
+        rows_to_process = db.get_pending(limit=limit)
+        print(f"Converting {todo} file(s)  (pending={total_pending})\n")
 
     done = failed = 0
     start_wall = time.monotonic()
 
-    for row in db.get_pending(limit=limit):
+    for row in rows_to_process:
         input_path  = Path(row["input_path"])
         output_path = Path(row["output_path"])
 
@@ -197,6 +212,8 @@ def main() -> None:
                         help="Print ffmpeg commands without executing")
     p_conv.add_argument("--limit", type=int, default=None, metavar="N",
                         help="Stop after converting N files")
+    p_conv.add_argument("--file", default=None, metavar="NAME",
+                        help="Convert only the file whose path contains NAME (case-insensitive)")
 
     # status
     sub.add_parser("status", help="Show conversion progress")

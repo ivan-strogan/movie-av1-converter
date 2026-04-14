@@ -143,6 +143,20 @@ def get_pending(limit: Optional[int] = None):
         conn.close()
 
 
+def get_pending_matching(name: str):
+    """Return pending rows whose input_path contains *name* (case-insensitive)."""
+    conn = _connect()
+    try:
+        return conn.execute("""
+            SELECT * FROM conversions
+            WHERE status = 'pending'
+              AND LOWER(input_path) LIKE LOWER(?)
+            ORDER BY input_path
+        """, (f"%{name}%",)).fetchall()
+    finally:
+        conn.close()
+
+
 def get_status_counts() -> dict:
     conn = _connect()
     try:
