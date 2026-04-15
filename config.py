@@ -6,8 +6,23 @@ Edit these values before running.
 from pathlib import Path
 
 # ── Source and destination ────────────────────────────────────────────────────
-MOVIES_DIR   = Path("/Volumes/video/Movies")
-OUTPUT_DIR   = Path("/Volumes/video/Movies_AV1")
+# Candidate roots in priority order: macOS mount first, then Linux.
+# The first existing directory wins.
+_NAS_CANDIDATES = [
+    Path("/Volumes/video"),   # macOS
+    Path("/mnt/video"),       # Linux
+]
+
+def _find_nas_root() -> Path:
+    for candidate in _NAS_CANDIDATES:
+        if candidate.is_dir():
+            return candidate
+    # Fall back to the first candidate so error messages show a real path
+    return _NAS_CANDIDATES[0]
+
+_NAS_ROOT  = _find_nas_root()
+MOVIES_DIR = _NAS_ROOT / "Movies"
+OUTPUT_DIR = _NAS_ROOT / "Movies_AV1"
 
 # ── Project paths ─────────────────────────────────────────────────────────────
 PROJECT_DIR  = Path(__file__).parent
