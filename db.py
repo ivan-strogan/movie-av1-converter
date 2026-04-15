@@ -111,6 +111,21 @@ def mark_failed(input_path: Path, error: str) -> None:
     """, (_now(), error, str(input_path)))
 
 
+def reset_failed() -> int:
+    """Reset all failed jobs back to pending so they are retried."""
+    conn = _connect()
+    try:
+        cur = conn.execute("""
+            UPDATE conversions SET status = 'pending',
+                started_at = NULL, completed_at = NULL, error_message = NULL
+            WHERE status = 'failed'
+        """)
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
 def reset_in_progress() -> int:
     """
     Any job left as in_progress means a previous run was interrupted mid-encode.

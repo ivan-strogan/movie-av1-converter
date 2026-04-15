@@ -37,6 +37,10 @@ def cmd_convert(args) -> None:
     if reset:
         print(f"Re-queued {reset} interrupted job(s) from previous run.")
 
+    if args.retry_failed:
+        n = db.reset_failed()
+        print(f"Re-queued {n} failed job(s) for retry.")
+
     # ── --file: single specific file ──────────────────────────────────────
     if args.file:
         rows = db.get_pending_matching(args.file)
@@ -114,7 +118,8 @@ def cmd_convert(args) -> None:
 
         ratio    = out_size / (row["input_size"] or 1)
         saved_mb = (row["input_size"] - out_size) / (1024 * 1024)
-        print(f"  OK  {elapsed:.0f}s  ratio={ratio:.2f}  saved={saved_mb:.0f} MB")
+        crf      = converter.crf_for_codec(row["input_codec"] or "")
+        print(f"  OK  {elapsed:.0f}s  CRF={crf}  ratio={ratio:.2f}  saved={saved_mb:.0f} MB")
 
     wall = time.monotonic() - start_wall
     inp_total, out_total = db.total_size_saved()
@@ -214,6 +219,8 @@ def main() -> None:
                         help="Stop after converting N files")
     p_conv.add_argument("--file", default=None, metavar="NAME",
                         help="Convert only the file whose path contains NAME (case-insensitive)")
+    p_conv.add_argument("--retry-failed", action="store_true",
+                        help="Re-queue all failed jobs and convert them")
 
     # status
     sub.add_parser("status", help="Show conversion progress")

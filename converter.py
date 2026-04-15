@@ -44,6 +44,7 @@ def convert(row, dry_run: bool = False) -> bool:
     sub_codec_arg = _subtitle_codec_arg(streams)
     external_srts = _find_external_srts(input_path)
     has_embedded_subs = _has_subtitles(streams)
+    source_codec = row["input_codec"] or ""
 
     cmd = _build_command(
         input_path=input_path,
@@ -51,9 +52,12 @@ def convert(row, dry_run: bool = False) -> bool:
         external_srts=external_srts,
         has_embedded_subs=has_embedded_subs,
         sub_codec_arg=sub_codec_arg,
+        source_codec=source_codec,
     )
 
     if dry_run:
+        crf = crf_for_codec(source_codec)
+        print(f"  [CRF {crf} — source codec: {source_codec or 'unknown'}]")
         print("  " + " ".join(_quote(c) for c in cmd))
         return True
 
@@ -106,12 +110,18 @@ def convert(row, dry_run: bool = False) -> bool:
 
 # ── Command builder ───────────────────────────────────────────────────────────
 
+def crf_for_codec(codec: str) -> int:
+    """Return the appropriate CRF for the given source codec name."""
+    return config.CRF_BY_CODEC.get(codec.lower(), config.CRF_DEFAULT)
+
+
 def _build_command(
     input_path: Path,
     output_path: Path,
     external_srts: list[tuple[Path, str]],   # [(srt_path, lang_code), …]
     has_embedded_subs: bool,
     sub_codec_arg: str,                       # 'copy' or 'srt'
+    source_codec: str = "",
 ) -> list[str]:
 
     cmd = [config.FFMPEG_BIN, "-hide_banner", "-loglevel", "warning",
@@ -139,9 +149,10 @@ def _build_command(
         cmd += ["-map", "0"]
 
     # ── Video encoding ────────────────────────────────────────────────────
+    crf = crf_for_codec(source_codec)
     cmd += [
         "-c:v", config.VIDEO_CODEC,
-        "-crf", str(config.CRF),
+        "-crf", str(crf),
         "-preset", str(config.PRESET),
         "-svtav1-params", config.SVTAV1_PARAMS,
     ]
@@ -275,22 +286,32 @@ def _run_with_progress(proc: subprocess.Popen, duration_secs: float) -> None:
     """
     fields: dict[str, str] = {}
 
-    for line in proc.stdout:
-        line = line.strip()
-        if "=" not in line:
-            continue
-        key, _, val = line.partition("=")
-        fields[key] = val
+    try:
+        for line in proc.stdout:
+            line = line.strip()
+            if "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            fields[key] = val
 
-        if key == "progress":   # ffmpeg emits this at the end of each update block
-            _print_bar(fields, duration_secs)
-            fields = {}
+            if key == "progress":   # ffmpeg emits this at the end of each update block
+                _print_bar(fields, duration_secs)
+                fields = {}
+    except Exception:
+        # Never let a progress bar bug kill the conversion —
+        # terminate ffmpeg cleanly and re-raise so the caller marks it failed.
+        proc.kill()
+        proc.wait()
+        raise
 
     proc.wait()
 
 
 def _print_bar(fields: dict, duration_secs: float) -> None:
-    out_time_us = int(fields.get("out_time_us", 0) or 0)
+    try:
+        out_time_us = int(fields.get("out_time_us", 0) or 0)
+    except (ValueError, TypeError):
+        out_time_us = 0
     speed_str   = fields.get("speed", "").replace("x", "")
     fps_str     = fields.get("fps", "0")
 

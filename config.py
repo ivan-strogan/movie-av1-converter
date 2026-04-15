@@ -35,13 +35,36 @@ FFMPEG_BIN   = "ffmpeg"
 FFPROBE_BIN  = "ffprobe"
 
 # ── SVT-AV1 encoding settings ─────────────────────────────────────────────────
-# CRF 20 with preset 5 is considered perceptually transparent (visually lossless)
-# relative to typical H.264 / MPEG-4 sources, while still yielding ~30-50%
-# smaller files than the H.264 source at equivalent quality.
-VIDEO_CODEC      = "libsvtav1"
-CRF              = 20
-PRESET           = 5
-SVTAV1_PARAMS    = "tune=0"   # tune=0 → VQ mode, best for film content
+VIDEO_CODEC   = "libsvtav1"
+PRESET        = 5
+SVTAV1_PARAMS = "tune=0"   # tune=0 → VQ mode, best for film content
+
+# CRF per source codec — tuned so AV1 output matches source quality without
+# blowing up in size.  Lower CRF = higher quality / larger file.
+#
+#  h264 / older codecs  → CRF 20  (less efficient originals, AV1 wins easily)
+#  hevc                 → CRF 28  (already efficient; CRF 20 would make files bigger)
+#  vp9                  → CRF 26  (similar efficiency to hevc)
+#  fallback             → CRF 23  (safe middle ground for anything unknown)
+CRF_BY_CODEC = {
+    "h264":       20,
+    "mpeg4":      20,
+    "msmpeg4v3":  20,
+    "msmpeg4v2":  20,
+    "msmpeg4":    20,
+    "mpeg2video": 20,
+    "mpeg1video": 20,
+    "wmv1":       20,
+    "wmv2":       20,
+    "wmv3":       20,
+    "rv40":       20,
+    "rv30":       20,
+    "vp8":        22,
+    "vp9":        26,
+    "hevc":       28,
+    "av1":        28,   # shouldn't happen (already AV1) but just in case
+}
+CRF_DEFAULT = 23   # fallback for any codec not listed above
 
 # ── Extensions ───────────────────────────────────────────────────────────────
 # Video files to convert
