@@ -4,6 +4,9 @@ conversions.db-shm
 conversions.db-wal
 logs/
 
+# Generated reports contain local file paths — not committed
+reports/*.txt
+
 # Python
 __pycache__/
 *.pyc
