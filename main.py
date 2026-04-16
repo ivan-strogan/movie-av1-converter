@@ -118,7 +118,11 @@ def cmd_convert(args) -> None:
 
         ratio    = out_size / (row["input_size"] or 1)
         saved_mb = (row["input_size"] - out_size) / (1024 * 1024)
-        crf      = converter.crf_for_codec(row["input_codec"] or "")
+        crf = converter.crf_for_source(
+            row["input_codec"] or "",
+            row["input_size"] or 0,
+            row["duration_secs"] or 0,
+        )
         print(f"  OK  {elapsed:.0f}s  CRF={crf}  ratio={ratio:.2f}  saved={saved_mb:.0f} MB")
 
     wall = time.monotonic() - start_wall

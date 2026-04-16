@@ -44,7 +44,15 @@ def convert(row, dry_run: bool = False) -> bool:
     sub_codec_arg = _subtitle_codec_arg(streams)
     external_srts = _find_external_srts(input_path)
     has_embedded_subs = _has_subtitles(streams)
-    source_codec = row["input_codec"] or ""
+    source_codec  = row["input_codec"] or ""
+    input_size    = row["input_size"] or 0
+    duration_secs = float(row["duration_secs"] or 0)
+    crf           = crf_for_source(source_codec, input_size, duration_secs)
+
+    if duration_secs > 0:
+        bitrate_kbps = int((input_size * 8) / (duration_secs * 1000))
+    else:
+        bitrate_kbps = 0
 
     cmd = _build_command(
         input_path=input_path,
@@ -53,11 +61,11 @@ def convert(row, dry_run: bool = False) -> bool:
         has_embedded_subs=has_embedded_subs,
         sub_codec_arg=sub_codec_arg,
         source_codec=source_codec,
+        crf_override=crf,
     )
 
     if dry_run:
-        crf = crf_for_codec(source_codec)
-        print(f"  [CRF {crf} — source codec: {source_codec or 'unknown'}]")
+        print(f"  [CRF {crf} — codec={source_codec or 'unknown'}  bitrate~{bitrate_kbps} kbps]")
         print("  " + " ".join(_quote(c) for c in cmd))
         return True
 
@@ -110,9 +118,35 @@ def convert(row, dry_run: bool = False) -> bool:
 
 # ── Command builder ───────────────────────────────────────────────────────────
 
+def crf_for_source(codec: str, input_size: int, duration_secs: float) -> int:
+    """
+    Select CRF based on source codec and estimated bitrate.
+    Ensures the AV1 output targets a bitrate lower than the source,
+    so files don't grow even for already-compressed sources.
+    """
+    # Estimate total bitrate in kbps from file size and duration
+    if duration_secs > 0:
+        bitrate_kbps = (input_size * 8) / (duration_secs * 1000)
+    else:
+        bitrate_kbps = 4000   # assume mid-range if unknown
+
+    # Pick base CRF from bitrate tier
+    base_crf = config.CRF_BITRATE_MAX
+    for threshold, crf in config.CRF_BITRATE_TIERS:
+        if bitrate_kbps < threshold:
+            base_crf = crf
+            break
+
+    # Apply codec efficiency offset
+    offset = config.CRF_CODEC_OFFSET.get(codec.lower(), 0)
+    crf = base_crf + offset
+
+    return max(config.CRF_MIN, min(crf, config.CRF_MAX))
+
+
 def crf_for_codec(codec: str) -> int:
-    """Return the appropriate CRF for the given source codec name."""
-    return config.CRF_BY_CODEC.get(codec.lower(), config.CRF_DEFAULT)
+    """Convenience wrapper using only codec (no bitrate info). Used for display."""
+    return crf_for_source(codec, 0, 0)
 
 
 def _build_command(
@@ -122,6 +156,7 @@ def _build_command(
     has_embedded_subs: bool,
     sub_codec_arg: str,                       # 'copy' or 'srt'
     source_codec: str = "",
+    crf_override: int = 0,
 ) -> list[str]:
 
     cmd = [config.FFMPEG_BIN, "-hide_banner", "-loglevel", "warning",
@@ -149,7 +184,7 @@ def _build_command(
         cmd += ["-map", "0"]
 
     # ── Video encoding ────────────────────────────────────────────────────
-    crf = crf_for_codec(source_codec)
+    crf = crf_override or crf_for_source(source_codec, 0, 0)
     cmd += [
         "-c:v", config.VIDEO_CODEC,
         "-crf", str(crf),

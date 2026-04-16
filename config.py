@@ -39,32 +39,52 @@ VIDEO_CODEC   = "libsvtav1"
 PRESET        = 5
 SVTAV1_PARAMS = "tune=0"   # tune=0 → VQ mode, best for film content
 
-# CRF per source codec — tuned so AV1 output matches source quality without
-# blowing up in size.  Lower CRF = higher quality / larger file.
+# ── CRF selection based on source bitrate + codec ────────────────────────────
 #
-#  h264 / older codecs  → CRF 20  (less efficient originals, AV1 wins easily)
-#  hevc                 → CRF 28  (already efficient; CRF 20 would make files bigger)
-#  vp9                  → CRF 26  (similar efficiency to hevc)
-#  fallback             → CRF 23  (safe middle ground for anything unknown)
-CRF_BY_CODEC = {
-    "h264":       20,
-    "mpeg4":      20,
-    "msmpeg4v3":  20,
-    "msmpeg4v2":  20,
-    "msmpeg4":    20,
-    "mpeg2video": 20,
-    "mpeg1video": 20,
-    "wmv1":       20,
-    "wmv2":       20,
-    "wmv3":       20,
-    "rv40":       20,
-    "rv30":       20,
-    "vp8":        22,
-    "vp9":        26,
-    "hevc":       28,
-    "av1":        28,   # shouldn't happen (already AV1) but just in case
+# Goal: AV1 output should always be smaller than the source while matching
+# its visual quality.  A low-bitrate source (e.g. a 700 kbps YIFY encode)
+# doesn't need a high-quality AV1 target — it just needs to match what's there.
+#
+# Bitrate tiers (kbps) → base CRF for h264-class sources:
+#   < 500    → 38   (very compressed, tiny source)
+#   500-1000 → 34
+#   1000-2000→ 30
+#   2000-4000→ 26
+#   4000-8000→ 22
+#   > 8000   → 20   (high-quality source, preserve faithfully)
+#
+# Codec efficiency adjustments applied on top of the bitrate tier:
+#   hevc / av1  → +6  (already very efficient)
+#   vp9         → +4
+#   mpeg4/older → -2  (less efficient, can afford lower CRF)
+CRF_BITRATE_TIERS = [
+    (500,  38),
+    (1000, 34),
+    (2000, 30),
+    (4000, 26),
+    (8000, 22),
+]
+CRF_BITRATE_MAX = 20   # used when bitrate > last tier
+
+# Added to base CRF depending on codec family
+CRF_CODEC_OFFSET = {
+    "hevc":       +6,
+    "av1":        +6,
+    "vp9":        +4,
+    "vp8":        +2,
+    "mpeg4":      -2,
+    "msmpeg4v3":  -2,
+    "msmpeg4v2":  -2,
+    "msmpeg4":    -2,
+    "mpeg2video": -2,
+    "mpeg1video": -2,
+    "wmv1":       -2,
+    "wmv2":       -2,
+    "wmv3":       -2,
 }
-CRF_DEFAULT = 23   # fallback for any codec not listed above
+
+CRF_MIN = 18
+CRF_MAX = 51
 
 # ── Extensions ───────────────────────────────────────────────────────────────
 # Video files to convert
