@@ -9,6 +9,11 @@ Commands:
   report                        Regenerate skipped_files.txt and failure log.
 """
 
+import signal
+import sys
+# Suppress BrokenPipeError when output is piped to head/tail/less and closed early
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+
 import argparse
 import sys
 import time
