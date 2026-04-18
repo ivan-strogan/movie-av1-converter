@@ -46,21 +46,38 @@ def cmd_convert(args) -> None:
         n = db.reset_failed()
         print(f"Re-queued {n} failed job(s) for retry.")
 
-    # ── --file: single specific file ──────────────────────────────────────
-    if args.file:
-        rows = db.get_pending_matching(args.file)
+    # ── --reconvert: force re-encode a specific file regardless of status ─
+    if args.reconvert:
+        rows = db.get_any_matching(args.reconvert)
         if not rows:
-            print(f"No pending file matching '{args.file}'. "
+            print(f"No file matching '{args.reconvert}' found in DB. "
+                  f"Run 'python3 main.py scan' first.")
+            return
+        if len(rows) > 1:
+            print(f"Multiple matches for '{args.reconvert}' — be more specific:\n")
+            for r in rows:
+                print(f"  {r['input_path']}  [{r['status']}]")
+            return
+        target = Path(rows[0]["input_path"])
+        db.reset_to_pending(target)
+        print(f"Re-queued '{target.name}' (was: {rows[0]['status']})\n")
+
+    # ── --file / --reconvert: single specific file ────────────────────────
+    if args.file or args.reconvert:
+        name = args.file or args.reconvert
+        rows = db.get_pending_matching(name)
+        if not rows:
+            print(f"No pending file matching '{name}'. "
                   f"Check the name or run 'python3 main.py status'.")
             return
         if len(rows) > 1:
-            print(f"Multiple matches for '{args.file}' — be more specific:\n")
+            print(f"Multiple matches for '{name}' — be more specific:\n")
             for r in rows:
                 print(f"  {r['input_path']}")
             return
         rows_to_process = rows
         todo = 1
-        print(f"Converting 1 file (matched '{args.file}')\n")
+        print(f"Converting 1 file (matched '{name}')\n")
     else:
         counts = db.get_status_counts()
         total_pending = counts.get("pending", 0)
@@ -88,7 +105,7 @@ def cmd_convert(args) -> None:
             continue
 
         t0 = time.monotonic()
-        ok = converter.convert(row, dry_run=False)
+        ok, crf_used = converter.convert(row, dry_run=False)
         elapsed = time.monotonic() - t0
 
         if not ok:
@@ -123,12 +140,7 @@ def cmd_convert(args) -> None:
 
         ratio    = out_size / (row["input_size"] or 1)
         saved_mb = (row["input_size"] - out_size) / (1024 * 1024)
-        crf = converter.crf_for_source(
-            row["input_codec"] or "",
-            row["input_size"] or 0,
-            row["duration_secs"] or 0,
-        )
-        print(f"  OK  {elapsed:.0f}s  CRF={crf}  ratio={ratio:.2f}  saved={saved_mb:.0f} MB")
+        print(f"  OK  {elapsed:.0f}s  CRF={crf_used}  ratio={ratio:.2f}  saved={saved_mb:.0f} MB")
 
     wall = time.monotonic() - start_wall
     inp_total, out_total = db.total_size_saved()
@@ -228,6 +240,8 @@ def main() -> None:
                         help="Stop after converting N files")
     p_conv.add_argument("--file", default=None, metavar="NAME",
                         help="Convert only the file whose path contains NAME (case-insensitive)")
+    p_conv.add_argument("--reconvert", default=None, metavar="NAME",
+                        help="Force re-encode a file by name even if already done/failed/skipped")
     p_conv.add_argument("--retry-failed", action="store_true",
                         help="Re-queue all failed jobs and convert them")
 

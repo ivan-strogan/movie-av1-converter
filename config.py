@@ -137,6 +137,12 @@ LANG_MAP = {
     "sr": "srp", "srp": "srp",
 }
 
+# ── Probe-encode tuning ───────────────────────────────────────────────────────
+# The 10-min sample must compress to at most this fraction of the source size.
+# 0.9 = at least 10% smaller than source. If not met, CRF is raised by 4 and
+# the sample is re-encoded until the target is met or CRF_MAX is hit.
+PROBE_TARGET_RATIO = 0.9
+
 # ── Verification tolerances ───────────────────────────────────────────────────
 # Maximum allowed duration difference (seconds) between source and output.
 DURATION_TOLERANCE_SECS = 0.5

@@ -13,6 +13,7 @@ Output is written atomically via a .tmp.mkv intermediate.
 """
 
 import json
+import math
 import os
 import re
 import subprocess
@@ -25,10 +26,10 @@ import db
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
-def convert(row, dry_run: bool = False) -> bool:
+def convert(row, dry_run: bool = False) -> tuple[bool, int]:
     """
     Convert one job row (sqlite3.Row from the DB).
-    Returns True on success, False on failure.
+    Returns (success, crf_used).
     """
     input_path  = Path(row["input_path"])
     output_path = Path(row["output_path"])
@@ -49,6 +50,10 @@ def convert(row, dry_run: bool = False) -> bool:
     duration_secs = float(row["duration_secs"] or 0)
     crf           = crf_for_source(source_codec, input_size, duration_secs)
 
+    _video_stream = next((s for s in streams if s.get("codec_type") == "video"), {})
+    resolution    = (f"{_video_stream['width']}x{_video_stream['height']}"
+                     if _video_stream.get("width") else "unknown")
+
     if duration_secs > 0:
         bitrate_kbps = int((input_size * 8) / (duration_secs * 1000))
     else:
@@ -67,7 +72,7 @@ def convert(row, dry_run: bool = False) -> bool:
     if dry_run:
         print(f"  [CRF {crf} — codec={source_codec or 'unknown'}  bitrate~{bitrate_kbps} kbps]")
         print("  " + " ".join(_quote(c) for c in cmd))
-        return True
+        return True, crf
 
     # ── Ensure output directory exists ────────────────────────────────────
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -81,10 +86,37 @@ def convert(row, dry_run: bool = False) -> bool:
     log_path = _log_path(input_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    duration_secs = float(row["duration_secs"] or 0)
+    input_mb = input_size / (1024 * 1024)
+    dur_min  = int(duration_secs // 60)
+    print(f"  Source: {source_codec or 'unknown'}  "
+          f"{resolution}  "
+          f"{bitrate_kbps} kbps  "
+          f"{input_mb:.0f} MB  "
+          f"{dur_min}min  "
+          f"starting CRF={crf}",
+          flush=True)
+
+    # ── Probe-encode a 10-min sample to tune CRF before full encode ───────
+    # Only worth doing for files longer than 20 minutes.
+    if duration_secs > 1200:
+        crf = _probe_crf(input_path, source_codec, input_size,
+                         duration_secs, crf, log_path)
+
+    cmd = _build_command(
+        input_path=input_path,
+        output_path=tmp_path,
+        external_srts=external_srts,
+        has_embedded_subs=has_embedded_subs,
+        sub_codec_arg=sub_codec_arg,
+        source_codec=source_codec,
+        crf_override=crf,
+    )
+
+    print(f"  Encoding full movie  CRF={crf}", flush=True)
 
     try:
-        with open(log_path, "w", encoding="utf-8") as log_fh:
+        with open(log_path, "a", encoding="utf-8") as log_fh:
+            log_fh.write(f"\n# Full encode — CRF {crf}\n")
             log_fh.write("# Command:\n# " + " ".join(_quote(c) for c in cmd) + "\n\n")
             log_fh.flush()
 
@@ -101,19 +133,19 @@ def convert(row, dry_run: bool = False) -> bool:
             _cleanup_tmp(tmp_path)
             error = f"ffmpeg exited with code {proc.returncode} — see {log_path}"
             db.mark_failed(input_path, error)
-            return False
+            return False, crf
 
         # Clear progress line before caller prints result
         print(f"\r{' ' * 80}\r", end="", flush=True)
 
         # Atomic rename: tmp → final
         tmp_path.rename(output_path)
-        return True
+        return True, crf
 
     except Exception as exc:
         _cleanup_tmp(tmp_path)
         db.mark_failed(input_path, str(exc))
-        return False
+        return False, crf
 
 
 # ── Command builder ───────────────────────────────────────────────────────────
@@ -271,6 +303,166 @@ def _find_external_srts(video_path: Path) -> list[tuple[Path, str]]:
 def _escape_glob(s: str) -> str:
     """Escape glob special characters in a filename stem."""
     return re.sub(r"([\[\]*?])", r"[\1]", s)
+
+
+def _probe_crf(
+    input_path: Path,
+    source_codec: str,
+    input_size: int,
+    duration_secs: float,
+    initial_crf: int,
+    log_path: Path,
+) -> int:
+    """
+    Encode a 10-minute sample from ~30% into the file to check whether
+    the current CRF will produce a smaller output than the source.
+
+    If the sample grows (ratio > 1.0), increase CRF by 4 and retry.
+    Repeats up to 4 times. Returns the best CRF found.
+    Cleans up all temp files on exit.
+    """
+    # Ten 1-min clips spread evenly at 5%, 15%, 25% ... 95% through the movie.
+    # Total sample = 10 min with full coverage, catching complex scenes that
+    # 2-clip sampling would miss (critical for animation and varied content).
+    clip_dur  = 60   # 1 minute each
+    positions = [0.05, 0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95]
+    clip_starts = [int(duration_secs * p) for p in positions]
+
+    # Bytes-per-second of the source (approx) for the total sample window
+    bps = input_size / duration_secs
+    sample_source_size = bps * (clip_dur * len(positions))
+
+    stem = input_path.stem[:40]
+    tmp_dir = Path("/tmp")
+    clips = [tmp_dir / f"_probe_clip{i}_{stem}.mkv" for i in range(len(positions))]
+    encs  = [tmp_dir / f"_probe_enc{i}_{stem}.mkv"  for i in range(len(positions))]
+
+    crf = initial_crf
+    chosen_crf = initial_crf
+
+    def _status(msg: str) -> None:
+        print(f"  {msg}", flush=True)
+
+    try:
+        pct_labels = [f"{int(p*100)}%" for p in positions]
+        _status(f"Probe: extracting 10 x 1min samples  "
+                f"({', '.join(pct_labels)})")
+
+        with open(log_path, "a", encoding="utf-8") as lf:
+            lf.write(f"\n# Probe extract: positions={pct_labels}, each {clip_dur}s\n")
+
+        # Extract all clips via stream copy (fast)
+        for start, clip in zip(clip_starts, clips):
+            result = subprocess.run([
+                config.FFMPEG_BIN, "-hide_banner", "-loglevel", "error",
+                "-ss", str(start), "-t", str(clip_dur),
+                "-i", str(input_path),
+                "-map", "0:v", "-map", "0:a?",
+                "-c", "copy",
+                "-y", str(clip),
+            ], capture_output=True, timeout=120)
+            if result.returncode != 0 or not clip.exists():
+                _status("Probe: clip extraction failed -- skipping probe, using initial CRF")
+                return crf
+
+        _status(f"Probe: samples ready  (10 x 1min = 10min total)")
+
+        for attempt in range(8):
+            _status(f"Probe: attempt {attempt + 1}/8  CRF={crf}")
+
+            # Encode all clips separately, sum sizes
+            total_enc_size = 0
+            encode_ok = True
+            for clip_label, clip, enc in zip(pct_labels, clips, encs):
+                _status(f"Probe: encoding clip {clip_label}  CRF={crf}")
+                enc_cmd = [
+                    config.FFMPEG_BIN, "-hide_banner", "-loglevel", "error",
+                    "-progress", "pipe:1", "-nostats",
+                    "-i", str(clip),
+                    "-map", "0:v", "-map", "0:a?",
+                    "-c:v", config.VIDEO_CODEC,
+                    "-crf", str(crf),
+                    "-preset", str(config.PRESET),
+                    "-svtav1-params", config.SVTAV1_PARAMS,
+                    "-c:a", "copy",
+                    "-y", str(enc),
+                ]
+                with open(log_path, "a", encoding="utf-8") as lf:
+                    proc = subprocess.Popen(
+                        enc_cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=lf,
+                        text=True,
+                    )
+                _run_with_progress(proc, clip_dur)
+                print()   # newline after progress bar
+                if proc.returncode != 0 or not enc.exists():
+                    encode_ok = False
+                    break
+                total_enc_size += enc.stat().st_size
+
+            if not encode_ok:
+                _status("Probe: encode failed -- using current CRF")
+                break
+
+            ratio   = total_enc_size / sample_source_size if sample_source_size > 0 else 1.0
+            src_mb  = sample_source_size / (1024 * 1024)
+            enc_mb  = total_enc_size / (1024 * 1024)
+
+            with open(log_path, "a", encoding="utf-8") as lf:
+                lf.write(f"# Probe attempt {attempt + 1}: CRF={crf}  "
+                         f"ratio={ratio:.3f}  enc={total_enc_size//1024}KB  "
+                         f"src~={int(sample_source_size)//1024}KB\n")
+
+            target_pct = int(config.PROBE_TARGET_RATIO * 100)
+            if ratio <= config.PROBE_TARGET_RATIO:
+                _status(f"Probe: sample OK  "
+                        f"ratio={ratio:.2f}  ({enc_mb:.0f}MB vs ~{src_mb:.0f}MB source)  "
+                        f"CRF={crf} accepted")
+                chosen_crf = crf
+                break
+
+            # Proportional CRF step: file size scales ~2^(-CRF/6), so the
+            # exact delta needed is 6 * log2(ratio / target). This gives a
+            # large bump when far from target and a small nudge when close.
+            delta = 6.0 * math.log2(ratio / config.PROBE_TARGET_RATIO)
+            if round(delta) == 0:
+                # Within the noise floor (< 0.5 CRF steps needed) -- accept.
+                _status(f"Probe: close enough  "
+                        f"ratio={ratio:.2f}  ({enc_mb:.0f}MB vs ~{src_mb:.0f}MB source)  "
+                        f"CRF={crf} accepted")
+                chosen_crf = crf
+                break
+            delta = max(1, round(delta))
+            next_crf = min(crf + delta, config.CRF_MAX)
+            _status(f"Probe: sample too large  "
+                    f"ratio={ratio:.2f}  ({enc_mb:.0f}MB vs ~{src_mb:.0f}MB source)  "
+                    f"need <{target_pct}%  ->  raising CRF {crf} -> {next_crf} (+{delta})")
+
+            chosen_crf = next_crf
+            crf = next_crf
+            if crf >= config.CRF_MAX:
+                _status(f"Probe: reached CRF_MAX ({config.CRF_MAX}) -- proceeding")
+                break
+
+            for p in encs:
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+
+        with open(log_path, "a", encoding="utf-8") as lf:
+            lf.write(f"# Probe selected CRF={chosen_crf}\n")
+
+        return chosen_crf
+
+    finally:
+        for p in clips + encs:
+            try:
+                if p.exists():
+                    p.unlink()
+            except OSError:
+                pass
 
 
 def _infer_lang(srt_stem: str, video_stem: str) -> str:

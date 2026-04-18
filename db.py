@@ -158,6 +158,32 @@ def get_pending(limit: Optional[int] = None):
         conn.close()
 
 
+def get_any_matching(name: str):
+    """Return rows (any status) whose input_path contains *name* (case-insensitive)."""
+    conn = _connect()
+    try:
+        return conn.execute("""
+            SELECT * FROM conversions
+            WHERE LOWER(input_path) LIKE LOWER(?)
+            ORDER BY input_path
+        """, (f"%{name}%",)).fetchall()
+    finally:
+        conn.close()
+
+
+def reset_to_pending(input_path: Path) -> None:
+    """Force a single file back to pending regardless of current status."""
+    _exec("""
+        UPDATE conversions
+        SET status = 'pending',
+            started_at = NULL,
+            completed_at = NULL,
+            error_message = NULL,
+            output_size = NULL
+        WHERE input_path = ?
+    """, (str(input_path),))
+
+
 def get_pending_matching(name: str):
     """Return pending rows whose input_path contains *name* (case-insensitive)."""
     conn = _connect()
