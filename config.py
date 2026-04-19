@@ -25,10 +25,22 @@ MOVIES_DIR = _NAS_ROOT / "Movies"
 OUTPUT_DIR = _NAS_ROOT / "Movies_AV1"
 
 # ── Project paths ─────────────────────────────────────────────────────────────
-PROJECT_DIR  = Path(__file__).parent
-DB_PATH      = PROJECT_DIR / "conversions.db"
-LOGS_DIR     = PROJECT_DIR / "logs"
-REPORTS_DIR  = PROJECT_DIR / "reports"
+PROJECT_DIR   = Path(__file__).parent
+LOCAL_DB_PATH = PROJECT_DIR / "conversions.db"
+NAS_DB_PATH   = OUTPUT_DIR / "conversions.db"
+LOGS_DIR      = PROJECT_DIR / "logs"
+REPORTS_DIR   = PROJECT_DIR / "reports"
+
+def _resolve_db() -> Path:
+    """
+    Use the NAS DB when the output directory is accessible.
+    Fall back to the local project DB otherwise (NAS not mounted).
+    """
+    if OUTPUT_DIR.is_dir():
+        return NAS_DB_PATH
+    return LOCAL_DB_PATH
+
+DB_PATH = _resolve_db()
 
 # ── ffmpeg / ffprobe binaries ─────────────────────────────────────────────────
 FFMPEG_BIN   = "ffmpeg"

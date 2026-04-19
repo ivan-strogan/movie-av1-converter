@@ -21,6 +21,7 @@ from pathlib import Path
 
 import config
 import db
+import lock
 import scanner
 import converter
 import verify
@@ -28,128 +29,175 @@ import verify
 
 # ── scan ──────────────────────────────────────────────────────────────────────
 
+def _startup_db() -> None:
+    """Init DB, announce which one is active, sync, then reconcile."""
+    db.init_db()
+
+    nas = config.NAS_DB_PATH
+    local = config.LOCAL_DB_PATH
+    active = config.DB_PATH
+
+    if active == nas:
+        print(f"DB: {nas}  (NAS)")
+    else:
+        print(f"DB: {local}  (local fallback — NAS not mounted)")
+
+    if db.sync_db():
+        other = local if active == nas else nas
+        print(f"DB synced -> {other}")
+
+    reset, found = db.reconcile()
+    if reset:
+        print(f"Reconcile: {reset} file(s) missing from disk, reset to pending.")
+    if found:
+        print(f"Reconcile: {found} already-converted file(s) marked done.")
+    if reset or found:
+        print()
+
+
 def cmd_scan(args) -> None:
-    scanner.scan(dry_run=args.dry_run)
+    if not args.dry_run:
+        if not lock.acquire():
+            sys.exit(1)
+    try:
+        _startup_db()
+        scanner.scan(dry_run=args.dry_run)
+        if not args.dry_run:
+            db.sync_db()
+    finally:
+        if not args.dry_run:
+            lock.release()
 
 
 # ── convert ───────────────────────────────────────────────────────────────────
 
 def cmd_convert(args) -> None:
-    db.init_db()
+    force_unlock = getattr(args, "force_unlock", False)
+    if not args.dry_run:
+        if not lock.acquire(force=force_unlock):
+            sys.exit(1)
+    try:
+        _startup_db()
 
-    # Re-queue any jobs that were left in_progress by a previous interrupted run
-    reset = db.reset_in_progress()
-    if reset:
-        print(f"Re-queued {reset} interrupted job(s) from previous run.")
+        # Re-queue any jobs that were left in_progress by a previous interrupted run
+        reset = db.reset_in_progress()
+        if reset:
+            print(f"Re-queued {reset} interrupted job(s) from previous run.")
 
-    if args.retry_failed:
-        n = db.reset_failed()
-        print(f"Re-queued {n} failed job(s) for retry.")
+        if args.retry_failed:
+            n = db.reset_failed()
+            print(f"Re-queued {n} failed job(s) for retry.")
 
-    # ── --reconvert: force re-encode a specific file regardless of status ─
-    if args.reconvert:
-        rows = db.get_any_matching(args.reconvert)
-        if not rows:
-            print(f"No file matching '{args.reconvert}' found in DB. "
-                  f"Run 'python3 main.py scan' first.")
-            return
-        if len(rows) > 1:
-            print(f"Multiple matches for '{args.reconvert}' — be more specific:\n")
-            for r in rows:
-                print(f"  {r['input_path']}  [{r['status']}]")
-            return
-        target = Path(rows[0]["input_path"])
-        db.reset_to_pending(target)
-        print(f"Re-queued '{target.name}' (was: {rows[0]['status']})\n")
+        # ── --reconvert: force re-encode a specific file regardless of status ─
+        if args.reconvert:
+            rows = db.get_any_matching(args.reconvert)
+            if not rows:
+                print(f"No file matching '{args.reconvert}' found in DB. "
+                      f"Run 'python3 main.py scan' first.")
+                return
+            if len(rows) > 1:
+                print(f"Multiple matches for '{args.reconvert}' — be more specific:\n")
+                for r in rows:
+                    print(f"  {r['input_path']}  [{r['status']}]")
+                return
+            target = Path(rows[0]["input_path"])
+            db.reset_to_pending(target)
+            print(f"Re-queued '{target.name}' (was: {rows[0]['status']})\n")
 
-    # ── --file / --reconvert: single specific file ────────────────────────
-    if args.file or args.reconvert:
-        name = args.file or args.reconvert
-        rows = db.get_pending_matching(name)
-        if not rows:
-            print(f"No pending file matching '{name}'. "
-                  f"Check the name or run 'python3 main.py status'.")
-            return
-        if len(rows) > 1:
-            print(f"Multiple matches for '{name}' — be more specific:\n")
-            for r in rows:
-                print(f"  {r['input_path']}")
-            return
-        rows_to_process = rows
-        todo = 1
-        print(f"Converting 1 file (matched '{name}')\n")
-    else:
-        counts = db.get_status_counts()
-        total_pending = counts.get("pending", 0)
-        if total_pending == 0:
-            print("No pending jobs. Run 'python3 main.py scan' first.")
-            return
-        limit = args.limit
-        todo  = min(total_pending, limit) if limit else total_pending
-        rows_to_process = db.get_pending(limit=limit)
-        print(f"Converting {todo} file(s)  (pending={total_pending})\n")
+        # ── --file / --reconvert: single specific file ────────────────────────
+        if args.file or args.reconvert:
+            name = args.file or args.reconvert
+            rows = db.get_pending_matching(name)
+            if not rows:
+                print(f"No pending file matching '{name}'. "
+                      f"Check the name or run 'python3 main.py status'.")
+                return
+            if len(rows) > 1:
+                print(f"Multiple matches for '{name}' — be more specific:\n")
+                for r in rows:
+                    print(f"  {r['input_path']}")
+                return
+            rows_to_process = rows
+            todo = 1
+            print(f"Converting 1 file (matched '{name}')\n")
+        else:
+            counts = db.get_status_counts()
+            total_pending = counts.get("pending", 0)
+            if total_pending == 0:
+                print("No pending jobs. Run 'python3 main.py scan' first.")
+                return
+            limit = args.limit
+            todo  = min(total_pending, limit) if limit else total_pending
+            rows_to_process = db.get_pending(limit=limit)
+            print(f"Converting {todo} file(s)  (pending={total_pending})\n")
 
-    done = failed = 0
-    start_wall = time.monotonic()
+        done = failed = 0
+        start_wall = time.monotonic()
 
-    for row in rows_to_process:
-        input_path  = Path(row["input_path"])
-        output_path = Path(row["output_path"])
+        for row in rows_to_process:
+            input_path  = Path(row["input_path"])
+            output_path = Path(row["output_path"])
 
-        label = input_path.relative_to(config.MOVIES_DIR)
-        print(f"[{done + failed + 1}/{todo}] {label}")
+            label = input_path.relative_to(config.MOVIES_DIR)
+            print(f"[{done + failed + 1}/{todo}] {label}")
 
-        if args.dry_run:
-            converter.convert(row, dry_run=True)
+            if args.dry_run:
+                converter.convert(row, dry_run=True)
+                done += 1
+                continue
+
+            t0 = time.monotonic()
+            ok, crf_used = converter.convert(row, dry_run=False)
+            elapsed = time.monotonic() - t0
+
+            if not ok:
+                failed += 1
+                print(f"  FAILED  ({elapsed:.0f}s)")
+                continue
+
+            # ── Verify output ──────────────────────────────────────────────────
+            src_audio = verify.count_audio_streams(input_path)
+            ok_verify, reason = verify.verify(
+                input_path=input_path,
+                output_path=output_path,
+                source_duration=row["duration_secs"] or 0,
+                source_audio_count=src_audio,
+            )
+
+            if not ok_verify:
+                try:
+                    if output_path.exists():
+                        output_path.unlink()
+                except OSError:
+                    pass
+                db.mark_failed(input_path, f"Verification failed: {reason}")
+                failed += 1
+                print(f"  VERIFY FAILED: {reason}  ({elapsed:.0f}s)")
+                continue
+
+            out_size = output_path.stat().st_size
+            db.mark_done(input_path, out_size)
             done += 1
-            continue
 
-        t0 = time.monotonic()
-        ok, crf_used = converter.convert(row, dry_run=False)
-        elapsed = time.monotonic() - t0
+            ratio    = out_size / (row["input_size"] or 1)
+            saved_mb = (row["input_size"] - out_size) / (1024 * 1024)
+            print(f"  OK  {elapsed:.0f}s  CRF={crf_used}  ratio={ratio:.2f}  saved={saved_mb:.0f} MB")
 
-        if not ok:
-            failed += 1
-            print(f"  FAILED  ({elapsed:.0f}s)")
-            continue
+        wall = time.monotonic() - start_wall
+        inp_total, out_total = db.total_size_saved()
+        print(f"\n{'─' * 60}")
+        print(f"Done: {done}  Failed: {failed}  Wall time: {_fmt_dur(wall)}")
+        if inp_total:
+            saved = (inp_total - out_total) / (1024 ** 3)
+            print(f"Space saved so far: {saved:.2f} GB  "
+                  f"(avg ratio {out_total/inp_total:.2f})")
 
-        # ── Verify output ──────────────────────────────────────────────────
-        src_audio = verify.count_audio_streams(input_path)
-        ok_verify, reason = verify.verify(
-            input_path=input_path,
-            output_path=output_path,
-            source_duration=row["duration_secs"] or 0,
-            source_audio_count=src_audio,
-        )
+        if not args.dry_run:
+            db.sync_db()
 
-        if not ok_verify:
-            # Delete corrupt output and mark failed
-            try:
-                if output_path.exists():
-                    output_path.unlink()
-            except OSError:
-                pass
-            db.mark_failed(input_path, f"Verification failed: {reason}")
-            failed += 1
-            print(f"  VERIFY FAILED: {reason}  ({elapsed:.0f}s)")
-            continue
-
-        out_size = output_path.stat().st_size
-        db.mark_done(input_path, out_size)
-        done += 1
-
-        ratio    = out_size / (row["input_size"] or 1)
-        saved_mb = (row["input_size"] - out_size) / (1024 * 1024)
-        print(f"  OK  {elapsed:.0f}s  CRF={crf_used}  ratio={ratio:.2f}  saved={saved_mb:.0f} MB")
-
-    wall = time.monotonic() - start_wall
-    inp_total, out_total = db.total_size_saved()
-    print(f"\n{'─' * 60}")
-    print(f"Done: {done}  Failed: {failed}  Wall time: {_fmt_dur(wall)}")
-    if inp_total:
-        saved = (inp_total - out_total) / (1024 ** 3)
-        print(f"Space saved so far: {saved:.2f} GB  "
-              f"(avg ratio {out_total/inp_total:.2f})")
+    finally:
+        if not args.dry_run:
+            lock.release()
 
 
 # ── status ────────────────────────────────────────────────────────────────────
@@ -244,6 +292,8 @@ def main() -> None:
                         help="Force re-encode a file by name even if already done/failed/skipped")
     p_conv.add_argument("--retry-failed", action="store_true",
                         help="Re-queue all failed jobs and convert them")
+    p_conv.add_argument("--force-unlock", action="store_true",
+                        help="Clear a stale lock left by a crashed run")
 
     # status
     sub.add_parser("status", help="Show conversion progress")

@@ -7,6 +7,7 @@ Status lifecycle:
   pending → skipped
 """
 
+import shutil
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -241,6 +242,90 @@ def total_size_saved() -> tuple[int, int]:
         return row["inp"], row["out"]
     finally:
         conn.close()
+
+
+# ── DB sync and reconciliation ────────────────────────────────────────────────
+
+def sync_db() -> bool:
+    """
+    Copy the active DB to the backup location.
+    NAS DB -> local copy, or local -> NAS if that's what's active.
+    Returns True if the copy succeeded.
+    """
+    src = config.DB_PATH
+    dst = (config.LOCAL_DB_PATH
+           if src == config.NAS_DB_PATH
+           else config.NAS_DB_PATH)
+
+    if not src.exists():
+        return False
+    if dst == src:
+        return True
+
+    try:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(src), str(dst))
+        return True
+    except OSError:
+        return False
+
+
+def reconcile() -> tuple[int, int]:
+    """
+    Reconcile the DB against what is actually on disk.
+
+    1. Rows marked 'done' whose output file no longer exists -> reset to pending.
+    2. Rows marked pending/failed/in_progress whose output already exists on
+       disk -> mark done (handles files converted on another machine).
+
+    Returns (reset_count, found_count).
+    """
+    conn = _connect()
+    reset_count = 0
+    found_count = 0
+
+    try:
+        # 1. Done rows where the output file is missing
+        done_rows = conn.execute("""
+            SELECT input_path, output_path FROM conversions WHERE status = 'done'
+        """).fetchall()
+
+        for row in done_rows:
+            out = Path(row["output_path"])
+            if not out.exists() or out.stat().st_size == 0:
+                conn.execute("""
+                    UPDATE conversions
+                    SET status = 'pending',
+                        output_size = NULL,
+                        completed_at = NULL
+                    WHERE input_path = ?
+                """, (row["input_path"],))
+                reset_count += 1
+
+        # 2. Not-done rows where the output file already exists
+        not_done = conn.execute("""
+            SELECT input_path, output_path
+            FROM conversions
+            WHERE status IN ('pending', 'failed', 'in_progress')
+        """).fetchall()
+
+        for row in not_done:
+            out = Path(row["output_path"])
+            if out.exists() and out.stat().st_size > 0:
+                conn.execute("""
+                    UPDATE conversions
+                    SET status = 'done',
+                        output_size = ?,
+                        completed_at = ?
+                    WHERE input_path = ?
+                """, (out.stat().st_size, _now(), row["input_path"]))
+                found_count += 1
+
+        conn.commit()
+    finally:
+        conn.close()
+
+    return reset_count, found_count
 
 
 # ── Internal ──────────────────────────────────────────────────────────────────
