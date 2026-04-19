@@ -219,14 +219,19 @@ def _write_scan_summary(counts: dict) -> None:
         GROUP BY input_codec ORDER BY n DESC
     """).fetchall()
 
-    ext_rows = conn.execute("""
-        SELECT LOWER(SUBSTR(input_path, INSTR(input_path, '.'), 10)) as ext,
-               COUNT(*) as n
-        FROM conversions
-        WHERE status = 'pending'
-        GROUP BY ext ORDER BY n DESC
+    path_rows = conn.execute("""
+        SELECT input_path FROM conversions WHERE status = 'pending'
     """).fetchall()
     conn.close()
+
+    # Count extensions in Python so Path.suffix correctly handles paths
+    # like ".../Spider-Man 2.1/movie.mp4" (SQL INSTR finds the first dot
+    # in the whole string, producing garbage like ".1/spider-man..." as ext)
+    from collections import Counter
+    ext_counts = Counter(
+        Path(r["input_path"]).suffix.lower() for r in path_rows
+    )
+    ext_rows = sorted(ext_counts.items(), key=lambda x: -x[1])
 
     out = config.REPORTS_DIR / "scan_summary.txt"
     with open(out, "w", encoding="utf-8") as f:
@@ -242,8 +247,8 @@ def _write_scan_summary(counts: dict) -> None:
                     f"  {_human(row['total_bytes'] or 0)}\n")
 
         f.write("\n## Source extension breakdown\n")
-        for row in ext_rows:
-            f.write(f"  {row['ext']:10s}  {row['n']:4d} files\n")
+        for ext, n in ext_rows:
+            f.write(f"  {ext:10s}  {n:4d} files\n")
 
     print(f"Scan summary written to {out}")
 
