@@ -30,6 +30,18 @@ if [ "$OS" = "Darwin" ]; then
     brew install ffmpeg python3
     success "ffmpeg and python3 installed"
 
+    # Check if the Homebrew ffmpeg includes libsvtav1.
+    # Some older installs or custom taps may be missing it.
+    if ! ffmpeg -encoders 2>/dev/null | grep -q libsvtav1; then
+        warn "Homebrew ffmpeg is missing libsvtav1."
+        info "Reinstalling ffmpeg from the default Homebrew tap..."
+        brew uninstall ffmpeg 2>/dev/null || true
+        brew install ffmpeg
+        if ! ffmpeg -encoders 2>/dev/null | grep -q libsvtav1; then
+            error "Still no libsvtav1 after reinstall. Try: brew install ffmpeg --HEAD"
+        fi
+    fi
+
 # ── Linux (Debian/Ubuntu) ─────────────────────────────────────────────────────
 elif [ "$OS" = "Linux" ]; then
 

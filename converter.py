@@ -353,16 +353,23 @@ def _probe_crf(
 
         # Extract all clips via stream copy (fast)
         for start, clip in zip(clip_starts, clips):
-            result = subprocess.run([
-                config.FFMPEG_BIN, "-hide_banner", "-loglevel", "error",
-                "-ss", str(start), "-t", str(clip_dur),
-                "-i", str(input_path),
-                "-map", "0:v", "-map", "0:a?",
-                "-c", "copy",
-                "-y", str(clip),
-            ], capture_output=True, timeout=120)
+            try:
+                result = subprocess.run([
+                    config.FFMPEG_BIN, "-hide_banner", "-loglevel", "error",
+                    "-ss", str(start), "-t", str(clip_dur),
+                    "-i", str(input_path),
+                    "-map", "0:v", "-map", "0:a?",
+                    "-c", "copy",
+                    "-y", str(clip),
+                ], capture_output=True, timeout=300)
+            except subprocess.TimeoutExpired:
+                _status("Probe: clip extraction timed out (slow NAS?) -- skipping probe, using initial CRF")
+                return crf
             if result.returncode != 0 or not clip.exists():
-                _status("Probe: clip extraction failed -- skipping probe, using initial CRF")
+                err = result.stderr.decode(errors="replace").strip()
+                _status(f"Probe: clip extraction failed -- skipping probe, using initial CRF")
+                if err:
+                    _status(f"Probe: ffmpeg error: {err[:200]}")
                 return crf
 
         _status(f"Probe: samples ready  (10 x 1min = 10min total)")
