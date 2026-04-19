@@ -8,6 +8,7 @@ Status lifecycle:
 """
 
 import shutil
+import socket
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,7 +36,7 @@ def _exec(sql: str, params: tuple = ()) -> None:
 
 
 def init_db() -> None:
-    """Create tables if they do not exist."""
+    """Create tables if they do not exist, and migrate older schemas."""
     conn = _connect()
     try:
         conn.execute("""
@@ -51,12 +52,25 @@ def init_db() -> None:
                 duration_secs   REAL,
                 started_at      TEXT,
                 completed_at    TEXT,
-                error_message   TEXT
+                error_message   TEXT,
+                crf_used        INTEGER,
+                encoded_by      TEXT,
+                encode_secs     REAL
             )
         """)
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_status ON conversions(status)
         """)
+        # Migrate older databases that pre-date these columns
+        for col_sql in [
+            "ALTER TABLE conversions ADD COLUMN crf_used    INTEGER",
+            "ALTER TABLE conversions ADD COLUMN encoded_by  TEXT",
+            "ALTER TABLE conversions ADD COLUMN encode_secs REAL",
+        ]:
+            try:
+                conn.execute(col_sql)
+            except sqlite3.OperationalError:
+                pass  # column already exists
         conn.commit()
     finally:
         conn.close()
@@ -110,19 +124,25 @@ def mark_in_progress(input_path: Path) -> None:
         UPDATE conversions
         SET status = 'in_progress',
             started_at = ?,
+            encoded_by = ?,
             error_message = NULL
         WHERE input_path = ?
-    """, (_now(), str(input_path)))
+    """, (_now(), socket.gethostname(), str(input_path)))
 
 
-def mark_done(input_path: Path, output_size: int) -> None:
+def mark_done(input_path: Path, output_size: int,
+              crf_used: int = 0, encode_secs: float = 0.0) -> None:
     _exec("""
         UPDATE conversions
         SET status = 'done',
-            output_size = ?,
-            completed_at = ?
+            output_size  = ?,
+            completed_at = ?,
+            crf_used     = ?,
+            encode_secs  = ?
         WHERE input_path = ?
-    """, (output_size, _now(), str(input_path)))
+    """, (output_size, _now(),
+          crf_used or None, encode_secs or None,
+          str(input_path)))
 
 
 def mark_failed(input_path: Path, error: str) -> None:

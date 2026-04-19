@@ -17,6 +17,7 @@ signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 import argparse
 import sys
 import time
+import traceback
 from pathlib import Path
 
 import config
@@ -158,7 +159,18 @@ def cmd_convert(args) -> None:
                 continue
 
             t0 = time.monotonic()
-            ok, crf_used = converter.convert(row, dry_run=False)
+            try:
+                ok, crf_used = converter.convert(row, dry_run=False)
+            except Exception:
+                elapsed = time.monotonic() - t0
+                traceback.print_exc()
+                try:
+                    db.mark_failed(input_path, traceback.format_exc())
+                except Exception:
+                    pass
+                failed += 1
+                print(f"  CRASHED  ({elapsed:.0f}s)")
+                continue
             elapsed = time.monotonic() - t0
 
             if not ok:
@@ -187,11 +199,13 @@ def cmd_convert(args) -> None:
                 continue
 
             out_size = output_path.stat().st_size
-            db.mark_done(input_path, out_size)
+            db.mark_done(input_path, out_size,
+                         crf_used=crf_used, encode_secs=round(elapsed, 1))
             done += 1
 
-            ratio    = out_size / (row["input_size"] or 1)
-            saved_mb = (row["input_size"] - out_size) / (1024 * 1024)
+            in_size  = row["input_size"] or 0
+            ratio    = out_size / in_size if in_size else 0.0
+            saved_mb = (in_size - out_size) / (1024 * 1024) if in_size else 0.0
             print(f"  OK  {elapsed:.0f}s  CRF={crf_used}  ratio={ratio:.2f}  saved={saved_mb:.0f} MB")
 
         wall = time.monotonic() - start_wall

@@ -39,7 +39,7 @@ def convert(row, dry_run: bool = False) -> tuple[bool, int]:
     probe = _ffprobe(input_path)
     if probe is None:
         db.mark_failed(input_path, "ffprobe failed before conversion")
-        return False
+        return False, 0
 
     streams = probe.get("streams", [])
     sub_codec_arg = _subtitle_codec_arg(streams)
@@ -336,14 +336,14 @@ def _probe_crf(
     clip_dur  = 60   # 1 minute each
     positions = [0.05, 0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95]
     clip_starts = [int(duration_secs * p) for p in positions]
-
-    # Bytes-per-second of the source (approx) for the total sample window
-    bps = input_size / duration_secs
-    sample_source_size = bps * (clip_dur * len(positions))
+    # sample_source_size is computed from actual extracted clip sizes after extraction
+    sample_source_size = 0
 
     stem = input_path.stem[:40]
     tmp_dir = Path("/tmp")
-    clips = [tmp_dir / f"_probe_clip{i}_{stem}.mkv" for i in range(len(positions))]
+    # Use .ts (MPEG-TS) for clips: it handles unknown/missing timestamps
+    # without errors, unlike MKV which rejects packets with no timestamp.
+    clips = [tmp_dir / f"_probe_clip{i}_{stem}.ts"  for i in range(len(positions))]
     encs  = [tmp_dir / f"_probe_enc{i}_{stem}.mkv"  for i in range(len(positions))]
 
     crf = initial_crf
@@ -360,15 +360,21 @@ def _probe_crf(
         with open(log_path, "a", encoding="utf-8") as lf:
             lf.write(f"\n# Probe extract: positions={pct_labels}, each {clip_dur}s\n")
 
-        # Extract all clips via stream copy (fast)
+        # Extract all clips via video-only stream copy into MPEG-TS.
+        # - Video-only: some files have audio with unknown timestamps that
+        #   break copy-to-container; audio is always stream-copied in the
+        #   full encode anyway, so excluding it keeps the ratio accurate.
+        # - MPEG-TS container: more tolerant of unknown/missing timestamps
+        #   than MKV; -fflags +genpts fills in any missing PTS from DTS.
         for start, clip in zip(clip_starts, clips):
             try:
                 result = subprocess.run([
                     config.FFMPEG_BIN, "-hide_banner", "-loglevel", "error",
+                    "-fflags", "+genpts",
                     "-ss", str(start), "-t", str(clip_dur),
                     "-i", str(input_path),
-                    "-map", "0:v", "-map", "0:a?",
-                    "-c", "copy",
+                    "-map", "0:v",
+                    "-c:v", "copy",
                     "-y", str(clip),
                 ], capture_output=True, timeout=300)
             except subprocess.TimeoutExpired:
@@ -381,6 +387,7 @@ def _probe_crf(
                     _status(f"Probe: ffmpeg error: {err[:200]}")
                 return crf
 
+        sample_source_size = sum(c.stat().st_size for c in clips if c.exists())
         _status(f"Probe: samples ready  (10 x 1min = 10min total)")
 
         for attempt in range(8):
@@ -395,12 +402,11 @@ def _probe_crf(
                     config.FFMPEG_BIN, "-hide_banner", "-loglevel", "error",
                     "-progress", "pipe:1", "-nostats",
                     "-i", str(clip),
-                    "-map", "0:v", "-map", "0:a?",
+                    "-map", "0:v",
                     "-c:v", config.VIDEO_CODEC,
                     "-crf", str(crf),
                     "-preset", str(config.PRESET),
                     "-svtav1-params", config.SVTAV1_PARAMS,
-                    "-c:a", "copy",
                     "-y", str(enc),
                 ]
                 with open(log_path, "a", encoding="utf-8") as lf:
