@@ -6,6 +6,8 @@ Checks:
   2. Duration is within DURATION_TOLERANCE_SECS of the source duration.
   3. Video codec of the output is 'av1'.
   4. Audio stream count >= source audio stream count.
+  5. Audio stream language and title tags match source.
+  6. Chapter count matches source (if source had chapters).
 
 Returns a (ok: bool, reason: str) tuple.
 """
@@ -70,12 +72,38 @@ def verify(input_path: Path, output_path: Path,
             )
 
     # ── 4. Audio stream count ─────────────────────────────────────────────
-    out_audio_count = sum(1 for s in streams if s.get("codec_type") == "audio")
-    if out_audio_count < source_audio_count:
+    out_audio = [s for s in streams if s.get("codec_type") == "audio"]
+    if len(out_audio) < source_audio_count:
         return False, (
             f"Audio stream count dropped: source had {source_audio_count}, "
-            f"output has {out_audio_count}"
+            f"output has {len(out_audio)}"
         )
+
+    # ── 5. Audio stream language / title tags ─────────────────────────────
+    src_probe = _ffprobe(input_path)
+    if src_probe is not None:
+        src_audio = [s for s in src_probe.get("streams", [])
+                     if s.get("codec_type") == "audio"]
+        for i, (src_s, out_s) in enumerate(zip(src_audio, out_audio)):
+            src_tags = src_s.get("tags", {})
+            out_tags = out_s.get("tags", {})
+            for tag in ("language", "title"):
+                sv = src_tags.get(tag, "").strip()
+                ov = out_tags.get(tag, "").strip()
+                if sv and sv != ov:
+                    return False, (
+                        f"Audio stream {i} tag '{tag}' changed: "
+                        f"source='{sv}' output='{ov}'"
+                    )
+
+        # ── 6. Chapter count ──────────────────────────────────────────────
+        src_chapters = src_probe.get("chapters", [])
+        out_chapters = probe.get("chapters", [])
+        if len(src_chapters) > 0 and len(out_chapters) < len(src_chapters):
+            return False, (
+                f"Chapter count dropped: source had {len(src_chapters)}, "
+                f"output has {len(out_chapters)}"
+            )
 
     return True, "ok"
 
@@ -98,6 +126,7 @@ def _ffprobe(path: Path) -> Optional[dict]:
         "-print_format", "json",
         "-show_format",
         "-show_streams",
+        "-show_chapters",
         str(path),
     ]
     try:
