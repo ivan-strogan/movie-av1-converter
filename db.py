@@ -67,11 +67,16 @@ def init_db() -> None:
 def upsert_pending(input_path: Path, output_path: Path,
                    input_codec: str, input_size: int,
                    duration_secs: float) -> None:
-    """Insert a new pending job, or leave existing row untouched."""
+    """Insert a new pending job; if row already exists, fill in any NULL metadata."""
     _exec("""
-        INSERT OR IGNORE INTO conversions
+        INSERT INTO conversions
             (input_path, output_path, status, input_codec, input_size, duration_secs)
         VALUES (?, ?, 'pending', ?, ?, ?)
+        ON CONFLICT(input_path) DO UPDATE SET
+            output_path   = COALESCE(conversions.output_path,   excluded.output_path),
+            input_codec   = COALESCE(conversions.input_codec,   excluded.input_codec),
+            input_size    = COALESCE(conversions.input_size,    excluded.input_size),
+            duration_secs = COALESCE(conversions.duration_secs, excluded.duration_secs)
     """, (str(input_path), str(output_path), input_codec, input_size, duration_secs))
 
 

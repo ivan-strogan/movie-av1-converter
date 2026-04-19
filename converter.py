@@ -45,9 +45,18 @@ def convert(row, dry_run: bool = False) -> tuple[bool, int]:
     sub_codec_arg = _subtitle_codec_arg(streams)
     external_srts = _find_external_srts(input_path)
     has_embedded_subs = _has_subtitles(streams)
-    source_codec  = row["input_codec"] or ""
-    input_size    = row["input_size"] or 0
-    duration_secs = float(row["duration_secs"] or 0)
+
+    # Fall back to live ffprobe values when DB metadata is NULL/zero
+    # (happens when a file was originally scanned as 'skipped' and never
+    # had input_codec/input_size/duration_secs populated in the DB)
+    _probe_fmt = probe.get("format", {})
+    _probe_video = next((s for s in streams if s.get("codec_type") == "video"), {})
+    source_codec  = (row["input_codec"] or
+                     _probe_video.get("codec_name", ""))
+    input_size    = (row["input_size"] or
+                     input_path.stat().st_size)
+    duration_secs = (float(row["duration_secs"] or 0) or
+                     float(_probe_fmt.get("duration", 0) or 0))
     crf           = crf_for_source(source_codec, input_size, duration_secs)
 
     _video_stream = next((s for s in streams if s.get("codec_type") == "video"), {})
