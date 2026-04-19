@@ -147,17 +147,26 @@ def _process_video(path: Path, skipped_lines: list,
         counts["skipped"] += 1
         return
 
-    # ── Check if output already exists and is complete ────────────────────
-    output_path = _output_path(path)
-    if output_path.exists() and output_path.stat().st_size > 0:
-        reason = f"Output already exists: {output_path}"
-        _record_skip(path, reason, skipped_lines, dry_run)
-        counts["skipped"] += 1
-        return
-
     input_size  = path.stat().st_size
     fmt         = info.get("format", {})
     duration    = float(fmt.get("duration", 0) or 0)
+    output_path = _output_path(path)
+
+    # ── Check if output already exists and is complete ────────────────────
+    if output_path.exists() and output_path.stat().st_size > 0:
+        if dry_run:
+            print(f"  [ALREADY DONE] {path.name}")
+        else:
+            db.upsert_done(
+                input_path=path,
+                output_path=output_path,
+                input_codec=codec,
+                input_size=input_size,
+                duration_secs=duration,
+                output_size=output_path.stat().st_size,
+            )
+        counts["done"] = counts.get("done", 0) + 1
+        return
 
     if dry_run:
         print(f"  [WOULD QUEUE] {path.name}  codec={codec}  "

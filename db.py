@@ -75,6 +75,24 @@ def upsert_pending(input_path: Path, output_path: Path,
     """, (str(input_path), str(output_path), input_codec, input_size, duration_secs))
 
 
+def upsert_done(input_path: Path, output_path: Path,
+                input_codec: str, input_size: int,
+                duration_secs: float, output_size: int) -> None:
+    """Insert or update a row as done (output already exists on disk)."""
+    _exec("""
+        INSERT INTO conversions
+            (input_path, output_path, status, input_codec, input_size,
+             duration_secs, output_size, completed_at)
+        VALUES (?, ?, 'done', ?, ?, ?, ?, ?)
+        ON CONFLICT(input_path) DO UPDATE SET
+            status       = 'done',
+            output_path  = excluded.output_path,
+            output_size  = excluded.output_size,
+            completed_at = excluded.completed_at
+    """, (str(input_path), str(output_path), input_codec, input_size,
+          duration_secs, output_size, _now()))
+
+
 def mark_skipped(input_path: Path, reason: str) -> None:
     _exec("""
         INSERT OR REPLACE INTO conversions (input_path, status, skip_reason)
@@ -307,6 +325,7 @@ def reconcile() -> tuple[int, int]:
             SELECT input_path, output_path
             FROM conversions
             WHERE status IN ('pending', 'failed', 'in_progress')
+              AND output_path IS NOT NULL
         """).fetchall()
 
         for row in not_done:
@@ -319,6 +338,31 @@ def reconcile() -> tuple[int, int]:
                         completed_at = ?
                     WHERE input_path = ?
                 """, (out.stat().st_size, _now(), row["input_path"]))
+                found_count += 1
+
+        # 3. Rows skipped because output already existed at scan time -> mark done
+        # output_path is NULL in skipped rows — extract it from skip_reason
+        # which is stored as "Output already exists: /path/to/file.mkv"
+        skipped_existing = conn.execute("""
+            SELECT input_path, skip_reason
+            FROM conversions
+            WHERE status = 'skipped'
+              AND skip_reason LIKE 'Output already exists:%'
+        """).fetchall()
+
+        for row in skipped_existing:
+            out_str = row["skip_reason"].split("Output already exists:", 1)[-1].strip()
+            out = Path(out_str)
+            if out.exists() and out.stat().st_size > 0:
+                conn.execute("""
+                    UPDATE conversions
+                    SET status = 'done',
+                        output_path = ?,
+                        skip_reason = NULL,
+                        output_size = ?,
+                        completed_at = ?
+                    WHERE input_path = ?
+                """, (str(out), out.stat().st_size, _now(), row["input_path"]))
                 found_count += 1
 
         conn.commit()

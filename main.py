@@ -31,20 +31,31 @@ import verify
 
 def _startup_db() -> None:
     """Init DB, announce which one is active, sync, then reconcile."""
-    db.init_db()
-
-    nas = config.NAS_DB_PATH
+    nas   = config.NAS_DB_PATH
     local = config.LOCAL_DB_PATH
     active = config.DB_PATH
+
+    # If NAS is the active DB but doesn't exist yet, and local DB has data,
+    # seed the NAS DB from local before init_db() creates an empty one there.
+    if active == nas and not nas.exists() and local.exists() and local.stat().st_size > 16384:
+        print(f"Seeding NAS DB from local copy...")
+        import shutil
+        nas.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(local), str(nas))
+
+    db.init_db()
 
     if active == nas:
         print(f"DB: {nas}  (NAS)")
     else:
         print(f"DB: {local}  (local fallback — NAS not mounted)")
 
-    if db.sync_db():
-        other = local if active == nas else nas
-        print(f"DB synced -> {other}")
+    # Only sync if the active DB has meaningful data to avoid clobbering a
+    # populated DB with a freshly created empty one.
+    if active.stat().st_size > 16384:
+        if db.sync_db():
+            other = local if active == nas else nas
+            print(f"DB synced -> {other}")
 
     reset, found = db.reconcile()
     if reset:
