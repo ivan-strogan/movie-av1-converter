@@ -147,6 +147,10 @@ def convert(row, dry_run: bool = False) -> tuple[bool, int]:
         # Clear progress line before caller prints result
         print(f"\r{' ' * 80}\r", end="", flush=True)
 
+        # Fix audio language tags that MKV muxing normalises away
+        # (e.g. source 'und' becomes '' in the MKV output).
+        _fix_audio_language_tags(streams, tmp_path, log_path)
+
         # Atomic rename: tmp → final
         tmp_path.rename(output_path)
         return True, crf
@@ -602,6 +606,71 @@ def _fmt_time(secs: float) -> str:
     if h:
         return f"{h}h{m:02d}m{s:02d}s"
     return f"{m:02d}m{s:02d}s"
+
+
+# ── Post-encode metadata fix ──────────────────────────────────────────────────
+
+def _fix_audio_language_tags(src_streams: list[dict],
+                              tmp_path: Path,
+                              log_path: Path) -> None:
+    """
+    MKV muxing normalises the 'und' (undetermined) language tag to an empty
+    string. After encoding, compare source audio language tags against what
+    is in the tmp file and remux with a stream copy to restore any that
+    changed. This is fast — no re-encoding, just rewriting the container.
+    """
+    # Collect (audio_index, language) pairs from source where lang is set
+    audio_langs: list[tuple[int, str]] = []
+    audio_idx = 0
+    for s in src_streams:
+        if s.get("codec_type") == "audio":
+            lang = s.get("tags", {}).get("language", "").strip()
+            if lang:
+                audio_langs.append((audio_idx, lang))
+            audio_idx += 1
+
+    if not audio_langs:
+        return  # no language tags in source, nothing to restore
+
+    # Check what the output actually has
+    out_probe = _ffprobe(tmp_path)
+    if out_probe is None:
+        return
+
+    out_audio = [s for s in out_probe.get("streams", [])
+                 if s.get("codec_type") == "audio"]
+
+    fixes: list[tuple[int, str]] = []
+    for idx, src_lang in audio_langs:
+        if idx >= len(out_audio):
+            continue
+        out_lang = out_audio[idx].get("tags", {}).get("language", "").strip()
+        if src_lang != out_lang:
+            fixes.append((idx, src_lang))
+
+    if not fixes:
+        return  # tags already match, nothing to do
+
+    # Run a stream-copy remux to restore the tags
+    fixed_path = tmp_path.with_suffix(".tagged.mkv")
+    cmd = [config.FFMPEG_BIN, "-hide_banner", "-loglevel", "error",
+           "-i", str(tmp_path), "-c", "copy"]
+    for idx, lang in fixes:
+        cmd += [f"-metadata:s:a:{idx}", f"language={lang}"]
+    cmd += ["-y", str(fixed_path)]
+
+    try:
+        with open(log_path, "a", encoding="utf-8") as lf:
+            lf.write(f"\n# Tag fix: restoring audio language tags {fixes}\n")
+        result = subprocess.run(cmd, capture_output=True, timeout=120)
+        if result.returncode == 0 and fixed_path.exists() and fixed_path.stat().st_size > 0:
+            fixed_path.replace(tmp_path)
+            print(f"  Tags: restored audio language tag(s) {[l for _, l in fixes]}",
+                  flush=True)
+        else:
+            _cleanup_tmp(fixed_path)
+    except (subprocess.TimeoutExpired, OSError):
+        _cleanup_tmp(fixed_path)
 
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
