@@ -223,9 +223,48 @@ def reset_to_pending(input_path: Path) -> None:
             started_at = NULL,
             completed_at = NULL,
             error_message = NULL,
-            output_size = NULL
+            output_size = NULL,
+            crf_used    = NULL,
+            encode_secs = NULL
         WHERE input_path = ?
     """, (str(input_path),))
+
+
+def reset_poor_ratio(threshold: float) -> list[str]:
+    """
+    Find done files whose output/input ratio exceeds *threshold* and reset
+    them to pending so they are re-encoded with tighter settings.
+    Returns the list of input_paths that were reset.
+    """
+    conn = _connect()
+    try:
+        rows = conn.execute("""
+            SELECT input_path, ROUND(output_size * 1.0 / input_size, 3) as ratio
+            FROM conversions
+            WHERE status = 'done'
+              AND input_size  > 0
+              AND output_size > 0
+              AND output_size * 1.0 / input_size > ?
+            ORDER BY ratio DESC
+        """, (threshold,)).fetchall()
+
+        for row in rows:
+            conn.execute("""
+                UPDATE conversions
+                SET status      = 'pending',
+                    started_at  = NULL,
+                    completed_at = NULL,
+                    error_message = NULL,
+                    output_size = NULL,
+                    crf_used    = NULL,
+                    encode_secs = NULL
+                WHERE input_path = ?
+            """, (row["input_path"],))
+
+        conn.commit()
+        return [row["input_path"] for row in rows]
+    finally:
+        conn.close()
 
 
 def get_pending_matching(name: str):

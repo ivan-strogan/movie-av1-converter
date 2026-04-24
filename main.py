@@ -96,6 +96,16 @@ def cmd_convert(args) -> None:
         if reset:
             print(f"Re-queued {reset} interrupted job(s) from previous run.")
 
+        # Re-queue done files that didn't compress enough
+        if config.RECONVERT_THRESHOLD is not None:
+            poor = db.reset_poor_ratio(config.RECONVERT_THRESHOLD)
+            if poor:
+                print(f"Re-queued {len(poor)} poorly-compressed file(s) "
+                      f"(ratio > {config.RECONVERT_THRESHOLD}):")
+                for p in poor:
+                    print(f"  {Path(p).name}")
+                print()
+
         if args.retry_failed:
             n = db.reset_failed()
             print(f"Re-queued {n} failed job(s) for retry.")

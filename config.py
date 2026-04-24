@@ -151,9 +151,14 @@ LANG_MAP = {
 
 # ── Probe-encode tuning ───────────────────────────────────────────────────────
 # The 10-min sample must compress to at most this fraction of the source size.
-# 0.9 = at least 10% smaller than source. If not met, CRF is raised by 4 and
-# the sample is re-encoded until the target is met or CRF_MAX is hit.
-PROBE_TARGET_RATIO = 0.9
+# 0.82 = at least 18% smaller than source. If not met, CRF is raised and the
+# sample is re-encoded until the target is met or CRF_MAX is hit.
+PROBE_TARGET_RATIO = 0.82
+
+# Done files whose output/input ratio exceeds this are automatically reset to
+# pending at the start of each convert run so they are re-encoded.
+# Set to None to disable the check.
+RECONVERT_THRESHOLD = 0.90
 
 # ── Verification tolerances ───────────────────────────────────────────────────
 # Maximum allowed duration difference (seconds) between source and output.
