@@ -66,6 +66,7 @@ def init_db() -> None:
             "ALTER TABLE conversions ADD COLUMN crf_used    INTEGER",
             "ALTER TABLE conversions ADD COLUMN encoded_by  TEXT",
             "ALTER TABLE conversions ADD COLUMN encode_secs REAL",
+            "ALTER TABLE conversions ADD COLUMN notes       TEXT",
         ]:
             try:
                 conn.execute(col_sql)
@@ -230,25 +231,64 @@ def reset_to_pending(input_path: Path) -> None:
     """, (str(input_path),))
 
 
+def set_notes(input_path: Path, notes: str) -> None:
+    """Store a human-readable note on a row (e.g. to flag manual follow-up)."""
+    _exec("""
+        UPDATE conversions SET notes = ? WHERE input_path = ?
+    """, (notes or None, str(input_path)))
+
+
+def get_flagged():
+    """Return rows that have a non-NULL notes field (flagged for follow-up)."""
+    conn = _connect()
+    try:
+        return conn.execute("""
+            SELECT * FROM conversions WHERE notes IS NOT NULL ORDER BY input_path
+        """).fetchall()
+    finally:
+        conn.close()
+
+
 def reset_poor_ratio(threshold: float) -> list[str]:
     """
-    Find done files whose output/input ratio exceeds *threshold* and reset
-    them to pending so they are re-encoded with tighter settings.
+    Find done files whose output/input ratio exceeds the threshold for their
+    bitrate tier and reset them to pending for re-encoding.
+
+    Low-bitrate sources are already compressed, so a higher ratio is
+    acceptable. Thresholds come from config.RECONVERT_THRESHOLD_TIERS.
     Returns the list of input_paths that were reset.
     """
     conn = _connect()
     try:
         rows = conn.execute("""
-            SELECT input_path, ROUND(output_size * 1.0 / input_size, 3) as ratio
+            SELECT input_path, input_size, duration_secs,
+                   ROUND(output_size * 1.0 / input_size, 3) as ratio
             FROM conversions
             WHERE status = 'done'
               AND input_size  > 0
               AND output_size > 0
-              AND output_size * 1.0 / input_size > ?
-            ORDER BY ratio DESC
-        """, (threshold,)).fetchall()
+        """).fetchall()
 
+        to_reset = []
         for row in rows:
+            ratio = row["ratio"]
+            # Compute bitrate in kbps to pick the right threshold tier
+            duration = row["duration_secs"] or 0
+            if duration > 0:
+                bitrate_kbps = (row["input_size"] * 8) / (duration * 1000)
+            else:
+                bitrate_kbps = 9999  # unknown → use base threshold
+
+            file_threshold = threshold
+            for max_kbps, tier_threshold in config.RECONVERT_THRESHOLD_TIERS:
+                if bitrate_kbps < max_kbps:
+                    file_threshold = tier_threshold
+                    break
+
+            if ratio > file_threshold:
+                to_reset.append(row["input_path"])
+
+        for path in to_reset:
             conn.execute("""
                 UPDATE conversions
                 SET status      = 'pending',
@@ -259,10 +299,10 @@ def reset_poor_ratio(threshold: float) -> list[str]:
                     crf_used    = NULL,
                     encode_secs = NULL
                 WHERE input_path = ?
-            """, (row["input_path"],))
+            """, (path,))
 
         conn.commit()
-        return [row["input_path"] for row in rows]
+        return to_reset
     finally:
         conn.close()
 

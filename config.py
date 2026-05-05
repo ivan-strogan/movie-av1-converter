@@ -155,10 +155,19 @@ LANG_MAP = {
 # sample is re-encoded until the target is met or CRF_MAX is hit.
 PROBE_TARGET_RATIO = 0.82
 
-# Done files whose output/input ratio exceeds this are automatically reset to
-# pending at the start of each convert run so they are re-encoded.
-# Set to None to disable the check.
-RECONVERT_THRESHOLD = 0.90
+# Done files whose output/input ratio exceeds the threshold for their bitrate
+# tier are automatically reset to pending so they are re-encoded.
+# Low-bitrate sources are already compressed, so a higher ratio is acceptable.
+# Set to None to disable the check entirely.
+#
+#   < 1000 kbps  → 0.95  (very compressed source, little room to improve)
+#   1000–2000    → 0.92
+#   > 2000 kbps  → 0.90  (high-bitrate source, AV1 should compress well)
+RECONVERT_THRESHOLD = 0.90   # base threshold (> 2000 kbps)
+RECONVERT_THRESHOLD_TIERS = [
+    (1000, 0.95),   # < 1000 kbps
+    (2000, 0.92),   # 1000–2000 kbps
+]
 
 # ── Verification tolerances ───────────────────────────────────────────────────
 # Maximum allowed duration difference (seconds) between source and output.

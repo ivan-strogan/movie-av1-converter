@@ -26,7 +26,8 @@ import db
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
-def convert(row, dry_run: bool = False) -> tuple[bool, int]:
+def convert(row, dry_run: bool = False,
+            audio_lang: str = "") -> tuple[bool, int]:
     """
     Convert one job row (sqlite3.Row from the DB).
     Returns (success, crf_used).
@@ -147,9 +148,10 @@ def convert(row, dry_run: bool = False) -> tuple[bool, int]:
         # Clear progress line before caller prints result
         print(f"\r{' ' * 80}\r", end="", flush=True)
 
-        # Fix audio language tags that MKV muxing normalises away
-        # (e.g. source 'und' becomes '' in the MKV output).
-        _fix_audio_language_tags(streams, tmp_path, log_path)
+        # Handle audio streams tagged 'und' (undetermined language).
+        # MKV cannot store 'und' — it normalises to ''.
+        # If the caller supplied --audio-lang, use it; otherwise flag for follow-up.
+        _handle_und_audio(streams, tmp_path, log_path, input_path, audio_lang)
 
         # Atomic rename: tmp → final
         tmp_path.rename(output_path)
@@ -449,16 +451,9 @@ def _probe_crf(
                 break
 
             # Proportional CRF step: file size scales ~2^(-CRF/6), so the
-            # exact delta needed is 6 * log2(ratio / target). This gives a
-            # large bump when far from target and a small nudge when close.
+            # exact delta needed is 6 * log2(ratio / target). Always raise by
+            # at least 1 — never accept a ratio above target as "close enough".
             delta = 6.0 * math.log2(ratio / config.PROBE_TARGET_RATIO)
-            if round(delta) == 0:
-                # Within the noise floor (< 0.5 CRF steps needed) -- accept.
-                _status(f"Probe: close enough  "
-                        f"ratio={ratio:.2f}  ({enc_mb:.0f}MB vs ~{src_mb:.0f}MB source)  "
-                        f"CRF={crf} accepted")
-                chosen_crf = crf
-                break
             delta = max(1, round(delta))
             next_crf = min(crf + delta, config.CRF_MAX)
             _status(f"Probe: sample too large  "
@@ -608,65 +603,82 @@ def _fmt_time(secs: float) -> str:
     return f"{m:02d}m{s:02d}s"
 
 
-# ── Post-encode metadata fix ──────────────────────────────────────────────────
+# ── Post-encode audio language handling ───────────────────────────────────────
 
-def _fix_audio_language_tags(src_streams: list[dict],
-                              tmp_path: Path,
-                              log_path: Path) -> None:
+def _parse_lang_assignments(audio_lang: str, und_indices: list[int]) -> dict[int, str]:
     """
-    MKV muxing normalises the 'und' (undetermined) language tag to an empty
-    string. After encoding, compare source audio language tags against what
-    is in the tmp file and remux with a stream copy to restore any that
-    changed. This is fast — no re-encoding, just rewriting the container.
+    Parse --audio-lang into a {audio_stream_index: lang_code} mapping.
+
+    Formats accepted:
+      'eng'          → apply 'eng' to every und stream
+      '0:eng'        → apply 'eng' to audio stream 0 only
+      '0:eng,1:fra'  → explicit per-stream mapping
     """
-    # Collect (audio_index, language) pairs from source where lang is set
-    audio_langs: list[tuple[int, str]] = []
+    if ":" not in audio_lang:
+        # Plain lang code — apply to all und streams
+        return {idx: audio_lang for idx in und_indices}
+
+    mapping: dict[int, str] = {}
+    for part in audio_lang.split(","):
+        part = part.strip()
+        if ":" in part:
+            idx_str, lang = part.split(":", 1)
+            mapping[int(idx_str.strip())] = lang.strip()
+    return mapping
+
+
+def _handle_und_audio(src_streams: list[dict], tmp_path: Path,
+                      log_path: Path, input_path: Path,
+                      audio_lang: str) -> None:
+    """
+    MKV cannot store the 'und' (undetermined) language tag — it normalises to ''.
+    If the source has 'und' audio streams:
+      - With --audio-lang LANG: remux the output to set the specified language.
+      - Without --audio-lang: flag the file in the DB so the user knows to
+        re-run with --audio-lang to set the correct language.
+    """
+    und_indices: list[int] = []
     audio_idx = 0
     for s in src_streams:
         if s.get("codec_type") == "audio":
-            lang = s.get("tags", {}).get("language", "").strip()
-            if lang:
-                audio_langs.append((audio_idx, lang))
+            if s.get("tags", {}).get("language", "").strip() == "und":
+                und_indices.append(audio_idx)
             audio_idx += 1
 
-    if not audio_langs:
-        return  # no language tags in source, nothing to restore
+    if not und_indices:
+        return  # no 'und' audio streams, nothing to do
 
-    # Check what the output actually has
-    out_probe = _ffprobe(tmp_path)
-    if out_probe is None:
+    if not audio_lang:
+        # No language provided — flag for manual follow-up
+        note = (f"Audio stream(s) {und_indices} tagged 'und' — "
+                f"re-run with --audio-lang LANG (or 0:eng,1:fra for per-stream) "
+                f"to set the correct language")
+        db.set_notes(input_path, note)
+        print(f"  NOTE: {note}", flush=True)
         return
 
-    out_audio = [s for s in out_probe.get("streams", [])
-                 if s.get("codec_type") == "audio"]
+    # Parse --audio-lang into a {stream_index: lang} mapping
+    assignments = _parse_lang_assignments(audio_lang, und_indices)
+    if not assignments:
+        return
 
-    fixes: list[tuple[int, str]] = []
-    for idx, src_lang in audio_langs:
-        if idx >= len(out_audio):
-            continue
-        out_lang = out_audio[idx].get("tags", {}).get("language", "").strip()
-        if src_lang != out_lang:
-            fixes.append((idx, src_lang))
-
-    if not fixes:
-        return  # tags already match, nothing to do
-
-    # Run a stream-copy remux to restore the tags
+    # Fast stream-copy remux to apply language tags
     fixed_path = tmp_path.with_suffix(".tagged.mkv")
     cmd = [config.FFMPEG_BIN, "-hide_banner", "-loglevel", "error",
            "-i", str(tmp_path), "-c", "copy"]
-    for idx, lang in fixes:
+    for idx, lang in assignments.items():
         cmd += [f"-metadata:s:a:{idx}", f"language={lang}"]
     cmd += ["-y", str(fixed_path)]
 
     try:
         with open(log_path, "a", encoding="utf-8") as lf:
-            lf.write(f"\n# Tag fix: restoring audio language tags {fixes}\n")
+            lf.write(f"\n# Audio language fix: {assignments}\n")
         result = subprocess.run(cmd, capture_output=True, timeout=120)
         if result.returncode == 0 and fixed_path.exists() and fixed_path.stat().st_size > 0:
             fixed_path.replace(tmp_path)
-            print(f"  Tags: restored audio language tag(s) {[l for _, l in fixes]}",
-                  flush=True)
+            db.set_notes(input_path, "")   # clear the 'und' follow-up flag
+            tag_summary = ", ".join(f"stream {i}={l}" for i, l in sorted(assignments.items()))
+            print(f"  Audio language tags set: {tag_summary}", flush=True)
         else:
             _cleanup_tmp(fixed_path)
     except (subprocess.TimeoutExpired, OSError):

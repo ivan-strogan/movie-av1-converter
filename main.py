@@ -168,9 +168,13 @@ def cmd_convert(args) -> None:
                 done += 1
                 continue
 
+
             t0 = time.monotonic()
             try:
-                ok, crf_used = converter.convert(row, dry_run=False)
+                ok, crf_used = converter.convert(
+                    row, dry_run=False,
+                    audio_lang=getattr(args, "audio_lang", "") or "",
+                )
             except Exception:
                 elapsed = time.monotonic() - t0
                 traceback.print_exc()
@@ -257,6 +261,14 @@ def cmd_status(args) -> None:
         print(f"\nSpace saved (done jobs): {saved_gb:.2f} GB  "
               f"(avg compression ratio {out/inp:.2f})")
 
+    flagged = db.get_flagged()
+    if flagged:
+        print(f"\nFlagged for follow-up ({len(flagged)} file(s)):")
+        for row in flagged:
+            from pathlib import Path as _Path
+            print(f"  {_Path(row['input_path']).name}")
+            print(f"    {row['notes']}")
+
 
 # ── report ────────────────────────────────────────────────────────────────────
 
@@ -329,6 +341,10 @@ def main() -> None:
                         help="Re-queue all failed jobs and convert them")
     p_conv.add_argument("--force-unlock", action="store_true",
                         help="Clear a stale lock left by a crashed run")
+    p_conv.add_argument("--audio-lang", default="", metavar="LANG",
+                        help="Set audio language for streams tagged 'und'. "
+                             "Plain code applies to all und streams (e.g. eng). "
+                             "Per-stream: 0:eng,1:fra. Use with --file or --reconvert.")
 
     # status
     sub.add_parser("status", help="Show conversion progress")

@@ -90,6 +90,12 @@ def verify(input_path: Path, output_path: Path,
             for tag in ("language", "title"):
                 sv = src_tags.get(tag, "").strip()
                 ov = out_tags.get(tag, "").strip()
+                # MKV cannot store 'und' (undetermined) — it normalises to ''.
+                # This is a container limitation, not a conversion error.
+                # Files with 'und' audio are flagged separately for --audio-lang.
+                if tag == "language":
+                    if sv == "und": sv = ""
+                    if ov == "und": ov = ""
                 if sv and sv != ov:
                     return False, (
                         f"Audio stream {i} tag '{tag}' changed: "
