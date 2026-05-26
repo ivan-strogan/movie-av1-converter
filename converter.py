@@ -46,12 +46,14 @@ def convert(row, dry_run: bool = False,
     sub_codec_arg = _subtitle_codec_arg(streams)
     external_srts = _find_external_srts(input_path)
     has_embedded_subs = _has_subtitles(streams)
+    video_idx     = _primary_video_index(streams)
 
     # Fall back to live ffprobe values when DB metadata is NULL/zero
     # (happens when a file was originally scanned as 'skipped' and never
     # had input_codec/input_size/duration_secs populated in the DB)
     _probe_fmt = probe.get("format", {})
-    _probe_video = next((s for s in streams if s.get("codec_type") == "video"), {})
+    _video_streams = [s for s in streams if s.get("codec_type") == "video"]
+    _probe_video = _video_streams[video_idx] if video_idx < len(_video_streams) else {}
     source_codec  = (row["input_codec"] or
                      _probe_video.get("codec_name", ""))
     input_size    = (row["input_size"] or
@@ -60,9 +62,8 @@ def convert(row, dry_run: bool = False,
                      float(_probe_fmt.get("duration", 0) or 0))
     crf           = crf_for_source(source_codec, input_size, duration_secs)
 
-    _video_stream = next((s for s in streams if s.get("codec_type") == "video"), {})
-    resolution    = (f"{_video_stream['width']}x{_video_stream['height']}"
-                     if _video_stream.get("width") else "unknown")
+    resolution    = (f"{_probe_video['width']}x{_probe_video['height']}"
+                     if _probe_video.get("width") else "unknown")
 
     if duration_secs > 0:
         bitrate_kbps = int((input_size * 8) / (duration_secs * 1000))
@@ -77,6 +78,7 @@ def convert(row, dry_run: bool = False,
         sub_codec_arg=sub_codec_arg,
         source_codec=source_codec,
         crf_override=crf,
+        video_idx=video_idx,
     )
 
     if dry_run:
@@ -120,6 +122,7 @@ def convert(row, dry_run: bool = False,
         sub_codec_arg=sub_codec_arg,
         source_codec=source_codec,
         crf_override=crf,
+        video_idx=video_idx,
     )
 
     print(f"  Encoding full movie  CRF={crf}", flush=True)
@@ -204,6 +207,7 @@ def _build_command(
     sub_codec_arg: str,                       # 'copy' or 'srt'
     source_codec: str = "",
     crf_override: int = 0,
+    video_idx: int = 0,                       # video-stream-relative index
 ) -> list[str]:
 
     cmd = [config.FFMPEG_BIN, "-hide_banner", "-loglevel", "warning",
@@ -214,21 +218,14 @@ def _build_command(
         cmd += ["-i", str(srt_path)]
 
     # ── Stream mapping ────────────────────────────────────────────────────
-    if external_srts and has_embedded_subs:
-        # Map all streams from input, then each external SRT
-        cmd += ["-map", "0:v", "-map", "0:a", "-map", "0:s"]
-        for idx in range(len(external_srts)):
-            cmd += ["-map", f"{idx + 1}:s"]
-
-    elif external_srts and not has_embedded_subs:
-        # Input video + audio, external SRTs only
-        cmd += ["-map", "0:v", "-map", "0:a"]
-        for idx in range(len(external_srts)):
-            cmd += ["-map", f"{idx + 1}:s"]
-
-    else:
-        # No external SRTs — map everything from input
-        cmd += ["-map", "0"]
+    # Always map the primary video stream explicitly by index so that
+    # secondary video streams (cover art, MJPEG thumbnails) are excluded.
+    cmd += ["-map", f"0:v:{video_idx}"]
+    cmd += ["-map", "0:a"]
+    if has_embedded_subs:
+        cmd += ["-map", "0:s"]
+    for idx in range(len(external_srts)):
+        cmd += ["-map", f"{idx + 1}:s"]
 
     # ── Video encoding ────────────────────────────────────────────────────
     crf = crf_override or crf_for_source(source_codec, 0, 0)
@@ -272,6 +269,38 @@ def _build_command(
     ]
 
     return cmd
+
+
+# ── Stream selection helpers ──────────────────────────────────────────────────
+
+def _primary_video_index(streams: list[dict]) -> int:
+    """
+    Return the video-stream-relative index of the primary video stream.
+
+    Skips attached pictures (cover art) and any stream flagged as such.
+    Among remaining candidates, picks by frame count (most frames = main
+    movie), falling back to largest resolution (width × height).
+    """
+    video_streams = [s for s in streams if s.get("codec_type") == "video"]
+
+    candidates = [
+        (i, s) for i, s in enumerate(video_streams)
+        if not s.get("disposition", {}).get("attached_pic", 0)
+    ]
+
+    if not candidates:
+        return 0  # fallback
+
+    if len(candidates) == 1:
+        return candidates[0][0]
+
+    def score(item: tuple) -> tuple:
+        _, s = item
+        nb_frames = int(s.get("nb_frames", 0) or 0)
+        pixels    = (s.get("width", 0) or 0) * (s.get("height", 0) or 0)
+        return (nb_frames, pixels)
+
+    return max(candidates, key=score)[0]
 
 
 # ── Subtitle helpers ──────────────────────────────────────────────────────────
