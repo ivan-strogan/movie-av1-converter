@@ -222,6 +222,10 @@ def cmd_convert(args) -> None:
             saved_mb = (in_size - out_size) / (1024 * 1024) if in_size else 0.0
             print(f"  OK  {elapsed:.0f}s  CRF={crf_used}  ratio={ratio:.2f}  saved={saved_mb:.0f} MB")
 
+            new_input = _rename_source_folder(input_path)
+            if new_input:
+                input_path = new_input
+
         wall = time.monotonic() - start_wall
         inp_total, out_total = db.total_size_saved()
         print(f"\n{'─' * 60}")
@@ -268,6 +272,55 @@ def cmd_status(args) -> None:
             from pathlib import Path as _Path
             print(f"  {_Path(row['input_path']).name}")
             print(f"    {row['notes']}")
+
+
+# ── rename ────────────────────────────────────────────────────────────────────
+
+def _rename_source_folder(input_path: Path) -> Path | None:
+    """
+    Rename the source movie folder to add SOURCE_DONE_SUFFIX.
+    Returns the new input_path if renamed, None if skipped or already renamed.
+    Flat files (directly in MOVIES_DIR) are skipped.
+    """
+    parent = input_path.parent
+    if parent == config.MOVIES_DIR:
+        return None  # flat file, no folder to rename
+    if parent.name.endswith(config.SOURCE_DONE_SUFFIX):
+        return None  # already renamed
+    new_parent = parent.with_name(parent.name + config.SOURCE_DONE_SUFFIX)
+    if new_parent.exists():
+        return None  # destination already exists
+    try:
+        parent.rename(new_parent)
+        new_input = new_parent / input_path.name
+        db.update_input_path(input_path, new_input)
+        return new_input
+    except OSError as e:
+        print(f"  Warning: could not rename source folder: {e}")
+        return None
+
+
+def cmd_rename(args) -> None:
+    """Rename source folders for all already-done conversions."""
+    db.init_db()
+    conn = db._connect()
+    rows = conn.execute(
+        "SELECT input_path FROM conversions WHERE status = 'done' ORDER BY input_path"
+    ).fetchall()
+    conn.close()
+
+    renamed = skipped = 0
+    for row in rows:
+        input_path = Path(row["input_path"])
+        result = _rename_source_folder(input_path)
+        if result:
+            renamed += 1
+            if not args.quiet:
+                print(f"  {input_path.parent.name}  →  {result.parent.name}")
+        else:
+            skipped += 1
+
+    print(f"\nRenamed: {renamed}  Skipped (flat/already done): {skipped}")
 
 
 # ── report ────────────────────────────────────────────────────────────────────
@@ -352,6 +405,10 @@ def main() -> None:
     # report
     sub.add_parser("report", help="Regenerate skipped/failed/summary reports")
 
+    # rename
+    p_rename = sub.add_parser("rename", help=f"Rename source folders of done files with '{config.SOURCE_DONE_SUFFIX}' suffix")
+    p_rename.add_argument("--quiet", action="store_true", help="Only print summary, not each renamed folder")
+
     args = parser.parse_args()
 
     dispatch = {
@@ -359,6 +416,7 @@ def main() -> None:
         "convert": cmd_convert,
         "status":  cmd_status,
         "report":  cmd_report,
+        "rename":  cmd_rename,
     }
     dispatch[args.command](args)
 

@@ -231,6 +231,13 @@ def reset_to_pending(input_path: Path) -> None:
     """, (str(input_path),))
 
 
+def update_input_path(old_path: Path, new_path: Path) -> None:
+    """Update input_path after the source folder is renamed."""
+    _exec("""
+        UPDATE conversions SET input_path = ? WHERE input_path = ?
+    """, (str(new_path), str(old_path)))
+
+
 def set_notes(input_path: Path, notes: str) -> None:
     """Store a human-readable note on a row (e.g. to flag manual follow-up)."""
     _exec("""

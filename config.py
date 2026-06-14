@@ -98,6 +98,12 @@ CRF_CODEC_OFFSET = {
 CRF_MIN = 18
 CRF_MAX = 51
 
+# ── Source folder tagging ────────────────────────────────────────────────────
+# After a successful conversion the source movie folder is renamed with this
+# suffix so you know the AV1 version is in Movies_AV1.
+# Flat files (directly in Movies/) are not renamed.
+SOURCE_DONE_SUFFIX = "_AV1"
+
 # ── Extensions ───────────────────────────────────────────────────────────────
 # Video files to convert
 CONVERT_EXTENSIONS = {".mp4", ".mkv", ".avi", ".m4v", ".divx", ".rmvb"}
