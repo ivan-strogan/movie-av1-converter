@@ -129,5 +129,35 @@ class TestDecide(unittest.TestCase):
         self.assertEqual(langdetect.decide(clips).language, "")
 
 
+class TestAssignLanguages(unittest.TestCase):
+    def run_assign(self, result_language, tag=""):
+        from unittest import mock
+        tracks = audio.parse_streams([stream(1, "ac3", 6, 48000, tag)])
+        fake = langdetect.LanguageResult(result_language, 0.0, 0)
+        with mock.patch.object(langdetect, "detect_track_language", return_value=fake):
+            langdetect.assign_languages(None, tracks, 7200)
+        return tracks[0]
+
+    def test_inconclusive_untagged_stays_unknown(self):
+        t = self.run_assign("")
+        self.assertEqual((t.language, t.lang_source), ("", "fallback"))
+        self.assertEqual(audio.unverified([t]), [0])
+        out = audio.plan_tracks([t], "Some Movie (2000)")[0]
+        self.assertEqual(out.title, "Unknown DD 5.1")
+        self.assertEqual(out.language, "")
+
+    def test_inconclusive_keeps_source_tag(self):
+        t = self.run_assign("", tag="fra")
+        self.assertEqual((t.language, t.lang_source), ("fra", "tag"))
+
+    def test_detected_overrides_tag(self):
+        t = self.run_assign("rus", tag="eng")
+        self.assertEqual((t.language, t.lang_source), ("rus", "detected"))
+
+    def test_other_marks_track_for_dropping(self):
+        t = self.run_assign("other", tag="fra")
+        self.assertEqual(t.lang_source, "other")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -660,7 +660,7 @@ def _plan_audio(streams: list[dict], input_path: Path, probe: dict,
             print(f"  Detecting audio language ({len(tracks)} track(s))...", flush=True)
             duration = float(probe.get("format", {}).get("duration", 0) or 0)
             try:
-                langdetect.assign_languages(input_path, tracks, duration, title)
+                langdetect.assign_languages(input_path, tracks, duration)
             except RuntimeError as exc:   # faster-whisper / numpy not installed
                 print(f"  WARNING: {exc} -- keeping source language tags", flush=True)
                 opts = audio.AudioOptions(detect_lang=False, drop_other=False,

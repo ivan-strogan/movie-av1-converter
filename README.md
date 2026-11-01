@@ -219,7 +219,8 @@ film and detects English vs Russian (Ukrainian counts as Russian). Tracks that a
 mostly neither English nor Russian are dropped (never all of them). It is slower
 and needs `pip install faster-whisper numpy`; without them a warning is printed
 and the source tags are kept. If detection is inconclusive the source tag is
-kept, or the title guess is used and the track is flagged.
+kept; with no tag the track is titled `Unknown ...`, has no language tag, and is
+flagged for review (it is never guessed).
 
 The three behaviours (detect, drop other languages, AAC to AC3) are switches in
 `config.py` (`AUDIO_DETECT_LANG`, `AUDIO_DROP_OTHER`, `AUDIO_AAC_TO_AC3`), all on

@@ -119,14 +119,15 @@ def detect_track_language(path: Path, stream_index: int, duration: float) -> Lan
 
 
 def assign_languages(path: Path, tracks: list["audio.AudioStream"],
-                     duration: float, movie_title: str) -> None:
+                     duration: float) -> None:
     """Set .language / .lang_source on each track from the audio itself (in place).
 
     - detected English/Russian -> that language, lang_source="detected"
     - some other language      -> lang_source="other" (language left as tagged)
-    - inconclusive             -> keep the source tag if there is one, otherwise
-                                  guess from the title (Cyrillic -> rus, else eng);
-                                  lang_source="fallback" so it is flagged for review
+    - inconclusive             -> keep the source tag if there is one; otherwise
+                                  the language stays unknown (titled "Unknown ...")
+                                  and lang_source="fallback" so it is flagged
+                                  for review. It is never guessed.
     """
     for a in tracks:
         result = detect_track_language(path, a.index, duration)
@@ -134,7 +135,5 @@ def assign_languages(path: Path, tracks: list["audio.AudioStream"],
             a.lang_source = "other"
         elif result.language:
             a.language, a.lang_source = result.language, "detected"
-        elif a.language:
-            a.lang_source = "tag"
         else:
-            a.language, a.lang_source = audio.movie_language(movie_title), "fallback"
+            a.lang_source = "tag" if a.language else "fallback"
