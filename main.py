@@ -20,6 +20,7 @@ import time
 import traceback
 from pathlib import Path
 
+import audio
 import config
 import db
 import lock
@@ -153,6 +154,9 @@ def cmd_convert(args) -> None:
             rows_to_process = db.get_pending(limit=limit)
             print(f"Converting {todo} file(s)  (pending={total_pending})\n")
 
+        audio_lang = getattr(args, "audio_lang", "") or ""
+        audio_opts = audio.AudioOptions.from_config()
+
         done = failed = 0
         start_wall = time.monotonic()
 
@@ -164,16 +168,17 @@ def cmd_convert(args) -> None:
             print(f"[{done + failed + 1}/{todo}] {label}")
 
             if args.dry_run:
-                converter.convert(row, dry_run=True)
+                converter.convert(row, dry_run=True, audio_lang=audio_lang,
+                                  audio_opts=audio_opts)
                 done += 1
                 continue
 
 
             t0 = time.monotonic()
             try:
-                ok, crf_used = converter.convert(
+                ok, crf_used, audio_tracks = converter.convert(
                     row, dry_run=False,
-                    audio_lang=getattr(args, "audio_lang", "") or "",
+                    audio_lang=audio_lang, audio_opts=audio_opts,
                 )
             except Exception:
                 elapsed = time.monotonic() - t0
@@ -199,6 +204,7 @@ def cmd_convert(args) -> None:
                 output_path=output_path,
                 source_duration=row["duration_secs"] or 0,
                 source_audio_count=src_audio,
+                expected_audio=audio_tracks,
             )
 
             if not ok_verify:
@@ -395,7 +401,7 @@ def main() -> None:
     p_conv.add_argument("--force-unlock", action="store_true",
                         help="Clear a stale lock left by a crashed run")
     p_conv.add_argument("--audio-lang", default="", metavar="LANG",
-                        help="Set audio language for streams tagged 'und'. "
+                        help="Set audio language by hand (overrides detection). "
                              "Plain code applies to all und streams (e.g. eng). "
                              "Per-stream: 0:eng,1:fra. Use with --file or --reconvert.")
 

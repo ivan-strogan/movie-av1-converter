@@ -1,7 +1,7 @@
 # movie-av1-converter
 
 Batch converts a movie library to AV1 (MKV container) using ffmpeg and SVT-AV1.
-Preserves all audio streams, embedded subtitles, external SRT files, chapters, and metadata.
+Preserves audio streams (with 48 kHz, language and title normalisation), embedded subtitles, external SRT files, chapters, and metadata.
 Originals are never modified.
 
 ---
@@ -111,6 +111,12 @@ Force re-encode a file even if it was already converted:
 python3 main.py convert --reconvert "bug's life"
 ```
 
+Set an audio language by hand (see [Audio handling](#audio-handling)):
+
+```bash
+python3 main.py convert --file "name" --audio-lang eng
+```
+
 Retry all previously failed jobs:
 
 ```bash
@@ -187,6 +193,42 @@ Generates:
 
 ---
 
+## Audio handling
+
+Every output audio track gets a language tag (`eng`, `rus`, ...) and a standard
+title (`English DD 5.1`) describing the **output** track, and exactly one track
+is flagged default: the first in the movie's own language (Cyrillic title =
+Russian, otherwise English), or the first track if none matches.
+
+| Source track | Action |
+|---|---|
+| AC3 / EAC3 at 48 kHz | Stream copy |
+| AC3 / EAC3 **not** at 48 kHz | Re-encode to 48 kHz AC3 (44.1 kHz AC3 skips and loses sync on TVs after seeking) |
+| DTS / DTS-HD / TrueHD / stereo or mono AAC | Stream copy |
+| AAC / MP3 5.1+ | Re-encode to AC3 5.1 |
+
+AC3 tops out at 5.1, so 6.1/7.1 sources are downmixed when re-encoded. Surround
+AC3 is encoded at 640 kbps, stereo at 192 kbps.
+
+Languages are resolved in this order: `--audio-lang`, then Whisper detection,
+then the source tag (`en` is normalised to `eng`; `und` means unknown). Tracks
+whose language is unknown or only a guess are flagged in `python3 main.py status`.
+
+**Whisper detection** ignores source tags: it samples speech clips across the
+film and detects English vs Russian (Ukrainian counts as Russian). Tracks that are
+mostly neither English nor Russian are dropped (never all of them). It is slower
+and needs `pip install faster-whisper numpy`; without them a warning is printed
+and the source tags are kept. If detection is inconclusive the source tag is
+kept, or the title guess is used and the track is flagged.
+
+The three behaviours (detect, drop other languages, AAC to AC3) are switches in
+`config.py` (`AUDIO_DETECT_LANG`, `AUDIO_DROP_OTHER`, `AUDIO_AAC_TO_AC3`), all on
+by default. Nothing needs to be passed on the command line.
+
+Run the tests with `python3 -m unittest tests.test_audio`.
+
+---
+
 ## Subtitle handling
 
 | Source codec | Output codec | Notes |
@@ -236,6 +278,9 @@ caffeinate -i python3 main.py convert
 main.py          -- CLI entry point (scan, convert, status, report)
 scanner.py       -- walks source directory and populates the database
 converter.py     -- ffmpeg command builder, probe pass, and full encode
+audio.py         -- audio track planning: 48 kHz rule, titles, languages, default track
+langdetect.py    -- optional Whisper audio language detection
+tests/           -- unit tests for audio planning
 verify.py        -- post-conversion output verification
 db.py            -- SQLite interface
 config.py        -- all settings and constants

@@ -7,7 +7,8 @@ Handles all four subtitle cases:
   3. External SRT-only (no embedded subs)
   4. Both embedded subs and external SRTs
 
-Audio streams are always stream-copied.
+Audio is planned by audio.py: copied by default, re-encoded to 48 kHz AC3 when
+the source AC3/EAC3 is not 48 kHz (see audio.py for the opt-in rules).
 Chapters and global metadata are always copied.
 Output is written atomically via a .tmp.mkv intermediate.
 """
@@ -20,17 +21,20 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
+import audio
 import config
 import db
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
-def convert(row, dry_run: bool = False,
-            audio_lang: str = "") -> tuple[bool, int]:
+def convert(row, dry_run: bool = False, audio_lang: str = "",
+            audio_opts: Optional[audio.AudioOptions] = None
+            ) -> tuple[bool, int, list[audio.AudioOutputTrack]]:
     """
     Convert one job row (sqlite3.Row from the DB).
-    Returns (success, crf_used).
+    Returns (success, crf_used, audio_tracks); audio_tracks is the planned
+    output audio, which verify.py checks the finished file against.
     """
     input_path  = Path(row["input_path"])
     output_path = Path(row["output_path"])
@@ -40,13 +44,16 @@ def convert(row, dry_run: bool = False,
     probe = _ffprobe(input_path)
     if probe is None:
         db.mark_failed(input_path, "ffprobe failed before conversion")
-        return False, 0
+        return False, 0, []
 
     streams = probe.get("streams", [])
     sub_codec_arg = _subtitle_codec_arg(streams)
     external_srts = _find_external_srts(input_path)
     has_embedded_subs = _has_subtitles(streams)
     video_idx     = _primary_video_index(streams)
+
+    audio_tracks = _plan_audio(streams, input_path, probe, audio_lang,
+                               audio_opts or audio.AudioOptions(), dry_run)
 
     # Fall back to live ffprobe values when DB metadata is NULL/zero
     # (happens when a file was originally scanned as 'skipped' and never
@@ -79,12 +86,13 @@ def convert(row, dry_run: bool = False,
         source_codec=source_codec,
         crf_override=crf,
         video_idx=video_idx,
+        audio_tracks=audio_tracks,
     )
 
     if dry_run:
         print(f"  [CRF {crf} — codec={source_codec or 'unknown'}  bitrate~{bitrate_kbps} kbps]")
         print("  " + " ".join(_quote(c) for c in cmd))
-        return True, crf
+        return True, crf, audio_tracks
 
     # ── Ensure output directory exists ────────────────────────────────────
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -123,6 +131,7 @@ def convert(row, dry_run: bool = False,
         source_codec=source_codec,
         crf_override=crf,
         video_idx=video_idx,
+        audio_tracks=audio_tracks,
     )
 
     print(f"  Encoding full movie  CRF={crf}", flush=True)
@@ -146,24 +155,19 @@ def convert(row, dry_run: bool = False,
             _cleanup_tmp(tmp_path)
             error = f"ffmpeg exited with code {proc.returncode} — see {log_path}"
             db.mark_failed(input_path, error)
-            return False, crf
+            return False, crf, audio_tracks
 
         # Clear progress line before caller prints result
         print(f"\r{' ' * 80}\r", end="", flush=True)
 
-        # Handle audio streams tagged 'und' (undetermined language).
-        # MKV cannot store 'und' — it normalises to ''.
-        # If the caller supplied --audio-lang, use it; otherwise flag for follow-up.
-        _handle_und_audio(streams, tmp_path, log_path, input_path, audio_lang)
-
         # Atomic rename: tmp → final
         tmp_path.rename(output_path)
-        return True, crf
+        return True, crf, audio_tracks
 
     except Exception as exc:
         _cleanup_tmp(tmp_path)
         db.mark_failed(input_path, str(exc))
-        return False, crf
+        return False, crf, audio_tracks
 
 
 # ── Command builder ───────────────────────────────────────────────────────────
@@ -208,6 +212,7 @@ def _build_command(
     source_codec: str = "",
     crf_override: int = 0,
     video_idx: int = 0,                       # video-stream-relative index
+    audio_tracks: Optional[list[audio.AudioOutputTrack]] = None,
 ) -> list[str]:
 
     cmd = [config.FFMPEG_BIN, "-hide_banner", "-loglevel", "warning",
@@ -221,7 +226,7 @@ def _build_command(
     # Always map the primary video stream explicitly by index so that
     # secondary video streams (cover art, MJPEG thumbnails) are excluded.
     cmd += ["-map", f"0:v:{video_idx}"]
-    cmd += ["-map", "0:a"]
+    cmd += audio.map_args(audio_tracks or [])
     if has_embedded_subs:
         cmd += ["-map", "0:s"]
     for idx in range(len(external_srts)):
@@ -236,8 +241,8 @@ def _build_command(
         "-svtav1-params", config.SVTAV1_PARAMS,
     ]
 
-    # ── Audio: stream copy ────────────────────────────────────────────────
-    cmd += ["-c:a", "copy"]
+    # ── Audio: per-track copy / 48 kHz AC3, language, title, default ──────
+    cmd += audio.codec_args(audio_tracks or [])
 
     # ── Subtitles ─────────────────────────────────────────────────────────
     if external_srts or has_embedded_subs:
@@ -632,86 +637,50 @@ def _fmt_time(secs: float) -> str:
     return f"{m:02d}m{s:02d}s"
 
 
-# ── Post-encode audio language handling ───────────────────────────────────────
+# ── Audio planning ────────────────────────────────────────────────────────────
 
-def _parse_lang_assignments(audio_lang: str, und_indices: list[int]) -> dict[int, str]:
+def _plan_audio(streams: list[dict], input_path: Path, probe: dict,
+                audio_lang: str, opts: audio.AudioOptions,
+                dry_run: bool) -> list[audio.AudioOutputTrack]:
     """
-    Parse --audio-lang into a {audio_stream_index: lang_code} mapping.
+    Resolve each audio track's language and decide what to do with it.
 
-    Formats accepted:
-      'eng'          → apply 'eng' to every und stream
-      '0:eng'        → apply 'eng' to audio stream 0 only
-      '0:eng,1:fra'  → explicit per-stream mapping
+    Language precedence: --audio-lang, then Whisper detection (if enabled),
+    then the source tag. Tracks whose language is still unknown or only a
+    guess are flagged in the DB for follow-up with --audio-lang.
     """
-    if ":" not in audio_lang:
-        # Plain lang code — apply to all und streams
-        return {idx: audio_lang for idx in und_indices}
+    tracks = audio.parse_streams(streams)
+    title = input_path.stem
 
-    mapping: dict[int, str] = {}
-    for part in audio_lang.split(","):
-        part = part.strip()
-        if ":" in part:
-            idx_str, lang = part.split(":", 1)
-            mapping[int(idx_str.strip())] = lang.strip()
-    return mapping
-
-
-def _handle_und_audio(src_streams: list[dict], tmp_path: Path,
-                      log_path: Path, input_path: Path,
-                      audio_lang: str) -> None:
-    """
-    MKV cannot store the 'und' (undetermined) language tag — it normalises to ''.
-    If the source has 'und' audio streams:
-      - With --audio-lang LANG: remux the output to set the specified language.
-      - Without --audio-lang: flag the file in the DB so the user knows to
-        re-run with --audio-lang to set the correct language.
-    """
-    und_indices: list[int] = []
-    audio_idx = 0
-    for s in src_streams:
-        if s.get("codec_type") == "audio":
-            if s.get("tags", {}).get("language", "").strip() == "und":
-                und_indices.append(audio_idx)
-            audio_idx += 1
-
-    if not und_indices:
-        return  # no 'und' audio streams, nothing to do
-
-    if not audio_lang:
-        # No language provided — flag for manual follow-up
-        note = (f"Audio stream(s) {und_indices} tagged 'und' — "
-                f"re-run with --audio-lang LANG (or 0:eng,1:fra for per-stream) "
-                f"to set the correct language")
-        db.set_notes(input_path, note)
-        print(f"  NOTE: {note}", flush=True)
-        return
-
-    # Parse --audio-lang into a {stream_index: lang} mapping
-    assignments = _parse_lang_assignments(audio_lang, und_indices)
-    if not assignments:
-        return
-
-    # Fast stream-copy remux to apply language tags
-    fixed_path = tmp_path.with_suffix(".tagged.mkv")
-    cmd = [config.FFMPEG_BIN, "-hide_banner", "-loglevel", "error",
-           "-i", str(tmp_path), "-c", "copy"]
-    for idx, lang in assignments.items():
-        cmd += [f"-metadata:s:a:{idx}", f"language={lang}"]
-    cmd += ["-y", str(fixed_path)]
-
-    try:
-        with open(log_path, "a", encoding="utf-8") as lf:
-            lf.write(f"\n# Audio language fix: {assignments}\n")
-        result = subprocess.run(cmd, capture_output=True, timeout=120)
-        if result.returncode == 0 and fixed_path.exists() and fixed_path.stat().st_size > 0:
-            fixed_path.replace(tmp_path)
-            db.set_notes(input_path, "")   # clear the 'und' follow-up flag
-            tag_summary = ", ".join(f"stream {i}={l}" for i, l in sorted(assignments.items()))
-            print(f"  Audio language tags set: {tag_summary}", flush=True)
+    if opts.detect_lang and tracks:
+        if dry_run:
+            print("  Audio language detection skipped in dry run", flush=True)
         else:
-            _cleanup_tmp(fixed_path)
-    except (subprocess.TimeoutExpired, OSError):
-        _cleanup_tmp(fixed_path)
+            import langdetect
+            print(f"  Detecting audio language ({len(tracks)} track(s))...", flush=True)
+            duration = float(probe.get("format", {}).get("duration", 0) or 0)
+            try:
+                langdetect.assign_languages(input_path, tracks, duration, title)
+            except RuntimeError as exc:   # faster-whisper / numpy not installed
+                print(f"  WARNING: {exc} -- keeping source language tags", flush=True)
+                opts = audio.AudioOptions(detect_lang=False, drop_other=False,
+                                          aac_to_ac3=opts.aac_to_ac3)
+
+    audio.apply_manual_languages(tracks, audio_lang)
+    planned = audio.plan_tracks(tracks, title, opts)
+
+    if not dry_run:
+        print(f"  Audio: {audio.describe(planned)}", flush=True)
+        unsure = audio.unverified(tracks)
+        if unsure:
+            note = (f"Audio stream(s) {unsure} language unknown or guessed — "
+                    f"re-run with --audio-lang LANG (or 0:eng,1:fra for per-stream) "
+                    f"to set the correct language")
+            db.set_notes(input_path, note)
+            print(f"  NOTE: {note}", flush=True)
+        else:
+            db.set_notes(input_path, "")
+    return planned
 
 
 # ── Utilities ─────────────────────────────────────────────────────────────────

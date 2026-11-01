@@ -21,7 +21,8 @@ import config
 
 
 def verify(input_path: Path, output_path: Path,
-           source_duration: float, source_audio_count: int) -> tuple[bool, str]:
+           source_duration: float, source_audio_count: int,
+           expected_audio: Optional[list] = None) -> tuple[bool, str]:
     """
     Verify the converted output file.
 
@@ -30,6 +31,10 @@ def verify(input_path: Path, output_path: Path,
         output_path:         Converted output file to verify.
         source_duration:     Duration in seconds from the original ffprobe scan.
         source_audio_count:  Number of audio streams in the original file.
+        expected_audio:      Planned output tracks (audio.AudioOutputTrack). When
+                             given, the output's audio is checked against the plan
+                             (count, language, title) instead of the source tags,
+                             since titles/languages are normalised on purpose.
 
     Returns:
         (True, "ok") on success, or (False, "<reason>") on failure.
@@ -71,17 +76,43 @@ def verify(input_path: Path, output_path: Path,
                 f"(tolerance={config.DURATION_TOLERANCE_SECS}s)"
             )
 
-    # ── 4. Audio stream count ─────────────────────────────────────────────
+    # ── 4. Audio streams ──────────────────────────────────────────────────
     out_audio = [s for s in streams if s.get("codec_type") == "audio"]
-    if len(out_audio) < source_audio_count:
+    if expected_audio is not None:
+        if len(out_audio) != len(expected_audio):
+            return False, (
+                f"Audio stream count mismatch: expected {len(expected_audio)}, "
+                f"output has {len(out_audio)}"
+            )
+        for i, (want, out_s) in enumerate(zip(expected_audio, out_audio)):
+            out_tags = out_s.get("tags", {})
+            got_lang = out_tags.get("language", "").strip()
+            if got_lang == "und":
+                got_lang = ""
+            if want.language != got_lang:
+                return False, (
+                    f"Audio stream {i} language: expected '{want.language}' "
+                    f"got '{got_lang}'"
+                )
+            got_title = out_tags.get("title", "").strip()
+            if want.title != got_title:
+                return False, (
+                    f"Audio stream {i} title: expected '{want.title}' "
+                    f"got '{got_title}'"
+                )
+            if want.codec_arg == "ac3":
+                rate = int(out_s.get("sample_rate") or 0)
+                if rate != config.AC3_SAMPLE_RATE:
+                    return False, f"Audio stream {i} sample rate {rate}, expected {config.AC3_SAMPLE_RATE}"
+    elif len(out_audio) < source_audio_count:
         return False, (
             f"Audio stream count dropped: source had {source_audio_count}, "
             f"output has {len(out_audio)}"
         )
 
-    # ── 5. Audio stream language / title tags ─────────────────────────────
     src_probe = _ffprobe(input_path)
-    if src_probe is not None:
+    if src_probe is not None and expected_audio is None:
+        # ── 5. Audio stream language / title tags (copy-only mode) ────────
         src_audio = [s for s in src_probe.get("streams", [])
                      if s.get("codec_type") == "audio"]
         for i, (src_s, out_s) in enumerate(zip(src_audio, out_audio)):
@@ -90,9 +121,6 @@ def verify(input_path: Path, output_path: Path,
             for tag in ("language", "title"):
                 sv = src_tags.get(tag, "").strip()
                 ov = out_tags.get(tag, "").strip()
-                # MKV cannot store 'und' (undetermined) — it normalises to ''.
-                # This is a container limitation, not a conversion error.
-                # Files with 'und' audio are flagged separately for --audio-lang.
                 if tag == "language":
                     if sv == "und": sv = ""
                     if ov == "und": ov = ""
@@ -102,6 +130,7 @@ def verify(input_path: Path, output_path: Path,
                         f"source='{sv}' output='{ov}'"
                     )
 
+    if src_probe is not None:
         # ── 6. Chapter count ──────────────────────────────────────────────
         src_chapters = src_probe.get("chapters", [])
         out_chapters = probe.get("chapters", [])
