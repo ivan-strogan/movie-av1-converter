@@ -238,6 +238,32 @@ def update_input_path(old_path: Path, new_path: Path) -> None:
     """, (str(new_path), str(old_path)))
 
 
+def folder_has_unfinished(folder: Path) -> bool:
+    """True if any file under folder still has a pending, in-progress or failed job."""
+    prefix = str(folder) + "/"
+    conn = _connect()
+    try:
+        row = conn.execute("""
+            SELECT 1 FROM conversions
+            WHERE substr(input_path, 1, ?) = ?
+              AND status IN ('pending', 'in_progress', 'failed')
+            LIMIT 1
+        """, (len(prefix), prefix)).fetchone()
+    finally:
+        conn.close()
+    return row is not None
+
+
+def rename_folder_paths(old_folder: Path, new_folder: Path) -> None:
+    """Re-point every input_path under old_folder at new_folder."""
+    old_prefix = str(old_folder) + "/"
+    _exec("""
+        UPDATE conversions
+        SET input_path = ? || substr(input_path, ?)
+        WHERE substr(input_path, 1, ?) = ?
+    """, (str(new_folder) + "/", len(old_prefix) + 1, len(old_prefix), old_prefix))
+
+
 def set_notes(input_path: Path, notes: str) -> None:
     """Store a human-readable note on a row (e.g. to flag manual follow-up)."""
     _exec("""

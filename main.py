@@ -284,23 +284,24 @@ def cmd_status(args) -> None:
 
 def _rename_source_folder(input_path: Path) -> Path | None:
     """
-    Rename the source movie folder to add SOURCE_DONE_SUFFIX.
-    Returns the new input_path if renamed, None if skipped or already renamed.
-    Flat files (directly in MOVIES_DIR) are skipped.
+    Rename the source movie folder to add SOURCE_DONE_SUFFIX, once every file
+    in it has finished. Returns the new input_path if renamed, None if skipped
+    or already renamed. Flat files (directly in MOVIES_DIR) are skipped.
     """
     parent = input_path.parent
     if parent == config.MOVIES_DIR:
         return None  # flat file, no folder to rename
     if parent.name.endswith(config.SOURCE_DONE_SUFFIX):
         return None  # already renamed
+    if db.folder_has_unfinished(parent):
+        return None  # other files in this folder still need converting
     new_parent = parent.with_name(parent.name + config.SOURCE_DONE_SUFFIX)
     if new_parent.exists():
         return None  # destination already exists
     try:
         parent.rename(new_parent)
-        new_input = new_parent / input_path.name
-        db.update_input_path(input_path, new_input)
-        return new_input
+        db.rename_folder_paths(parent, new_parent)
+        return new_parent / input_path.name
     except OSError as e:
         print(f"  Warning: could not rename source folder: {e}")
         return None
