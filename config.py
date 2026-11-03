@@ -155,6 +155,32 @@ LANG_MAP = {
     "sr": "srp", "srp": "srp",
 }
 
+# ── Audio settings ────────────────────────────────────────────────────────────
+# AC3/EAC3 must be 48 kHz: TVs/receivers glitch on 44.1 kHz AC3 (audio skips
+# and loses sync after seeking). Anything else is re-encoded to 48 kHz AC3.
+AC3_SAMPLE_RATE    = 48000
+AC3_BITRATE        = "640k"   # surround (5.0 and up)
+AC3_STEREO_BITRATE = "192k"   # stereo/mono re-encodes
+
+# Audio pipeline switches (all on = same behaviour as movie-standardizer).
+AUDIO_DETECT_LANG = True   # Whisper decides each track's language (needs faster-whisper + numpy;
+                           # if they are not installed a warning is printed and tags are kept)
+AUDIO_DROP_OTHER  = True   # drop tracks that are neither English nor Russian (needs detection)
+AUDIO_AAC_TO_AC3  = True   # re-encode AAC/MP3 5.1+ to AC3 5.1 (stereo is copied)
+
+AAC_TRANSCODE_CODECS = {"aac", "mp3", "vorbis", "opus"}
+
+# Whisper model for language detection.
+LANG_DETECT_MODEL = "small"
+
+# Display names used in audio track titles ("English DD 5.1").
+# Languages not listed fall back to the upper-cased code.
+LANG_NAMES = {
+    "eng": "English", "rus": "Russian", "fra": "French", "ger": "German",
+    "spa": "Spanish", "ita": "Italian", "por": "Portuguese", "jpn": "Japanese",
+    "kor": "Korean", "chi": "Chinese", "ukr": "Ukrainian", "pol": "Polish",
+}
+
 # ── Probe-encode tuning ───────────────────────────────────────────────────────
 # The 10-min sample must compress to at most this fraction of the source size.
 # 0.82 = at least 18% smaller than source. If not met, CRF is raised and the
