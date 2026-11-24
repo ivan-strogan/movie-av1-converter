@@ -20,6 +20,38 @@ from typing import Optional
 import config
 
 
+def _tag_seconds(value: str) -> float:
+    """Parse a Matroska DURATION tag ('01:03:09.440000000') into seconds."""
+    try:
+        h, m, sec = value.strip().split(":")
+        return int(h) * 3600 + int(m) * 60 + float(sec)
+    except (ValueError, AttributeError):
+        return 0.0
+
+
+def content_duration(probe: dict) -> float:
+    """
+    Duration of the video/audio content in an ffprobe result, in seconds.
+
+    The container duration also covers subtitle tracks, so a subtitle cue that
+    runs past the end of the film stretches it. The Matroska muxer writes a
+    per-track DURATION tag for video and audio; use the longest of those, and
+    fall back to the container duration when the tags are missing.
+    """
+    durations = []
+    for s in probe.get("streams", []):
+        if s.get("codec_type") not in ("video", "audio"):
+            continue
+        d = _tag_seconds(s.get("tags", {}).get("DURATION", ""))
+        if d <= 0:
+            d = float(s.get("duration") or 0)
+        if d > 0:
+            durations.append(d)
+    if durations:
+        return max(durations)
+    return float(probe.get("format", {}).get("duration", 0) or 0)
+
+
 def verify(input_path: Path, output_path: Path,
            source_duration: float, source_audio_count: int,
            expected_audio: Optional[list] = None) -> tuple[bool, str]:
@@ -64,8 +96,7 @@ def verify(input_path: Path, output_path: Path,
         return False, f"Expected video codec 'av1', got '{out_codec}'"
 
     # ── 2. Duration check ─────────────────────────────────────────────────
-    fmt = probe.get("format", {})
-    out_duration = float(fmt.get("duration", 0) or 0)
+    out_duration = content_duration(probe)
 
     if source_duration > 0:
         delta = abs(out_duration - source_duration)
