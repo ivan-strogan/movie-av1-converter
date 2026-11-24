@@ -3,8 +3,10 @@ Audio track planning for one conversion job.
 
 Turns the source's audio streams into an ordered list of output tracks:
 
-  - AC3/EAC3 not at 48 kHz  -> re-encoded to 48 kHz AC3 (44.1 kHz AC3 skips
-    and loses sync on TVs after seeking)
+  - stereo/mono AC3/EAC3    -> re-encoded to 48 kHz AAC (stereo AC3 skips and
+    loses sync on TVs after seeking; AC3 is only for 3+ channels)
+  - 3+ channel AC3/EAC3 not at 48 kHz -> re-encoded to 48 kHz AC3 (44.1 kHz
+    AC3 skips and loses sync on TVs after seeking)
   - AAC/MP3/etc. 5.1+       -> re-encoded to AC3 5.1 (config.AUDIO_AAC_TO_AC3)
   - everything else         -> stream copy
   - tracks detected as neither English nor Russian are dropped
@@ -51,9 +53,14 @@ class AudioStream:
         return self.channels >= 5
 
     @property
+    def is_stereo_ac3(self) -> bool:
+        """Stereo/mono AC3/EAC3: becomes AAC. (0 channels = unknown: left alone.)"""
+        return self.codec in ("ac3", "eac3") and 1 <= self.channels <= 2
+
+    @property
     def needs_resample(self) -> bool:
-        """AC3/EAC3 not at 48 kHz: copying it would keep the bad rate."""
-        return (self.codec in ("ac3", "eac3")
+        """3+ channel AC3/EAC3 not at 48 kHz: copying it would keep the bad rate."""
+        return (self.codec in ("ac3", "eac3") and self.channels > 2
                 and self.sample_rate not in (0, config.AC3_SAMPLE_RATE))
 
     @property
@@ -64,7 +71,7 @@ class AudioStream:
 @dataclass
 class AudioOutputTrack:
     source_index: int
-    codec_arg:    str     # "copy" or "ac3"
+    codec_arg:    str     # "copy", "ac3" or "aac"
     bitrate_arg:  str     # "" for copy
     out_channels: int
     title:        str
@@ -192,13 +199,22 @@ def plan_tracks(audio: list[AudioStream], movie_title: str,
 
     tracks = []
     for a in keep:
-        if a.needs_resample or (opts.aac_to_ac3 and a.is_aac_surround):
+        if a.is_stereo_ac3:
+            tracks.append(AudioOutputTrack(
+                source_index = a.index,
+                codec_arg    = "aac",
+                bitrate_arg  = (config.AAC_STEREO_BITRATE if a.channels == 2
+                                else config.AAC_MONO_BITRATE),
+                out_channels = a.channels,
+                title        = track_title(a.language, "aac", a.channels),
+                language     = a.language,
+            ))
+        elif a.needs_resample or (opts.aac_to_ac3 and a.is_aac_surround):
             out_ch = min(a.channels, 6)   # AC3 tops out at 5.1: 6.1/7.1 downmix
             tracks.append(AudioOutputTrack(
                 source_index = a.index,
                 codec_arg    = "ac3",
-                bitrate_arg  = (config.AC3_BITRATE if a.is_surround
-                                else config.AC3_STEREO_BITRATE),
+                bitrate_arg  = config.AC3_BITRATE,
                 out_channels = out_ch,
                 title        = track_title(a.language, "ac3", out_ch),
                 language     = a.language,
@@ -239,7 +255,7 @@ def codec_args(tracks: list[AudioOutputTrack]) -> list[str]:
     args: list[str] = []
     for i, t in enumerate(tracks):
         args += [f"-c:a:{i}", t.codec_arg]
-        if t.codec_arg == "ac3":
+        if t.codec_arg in ("ac3", "aac"):
             args += [f"-b:a:{i}", t.bitrate_arg,
                      f"-ar:a:{i}", str(config.AC3_SAMPLE_RATE),
                      f"-ac:a:{i}", str(t.out_channels)]
@@ -252,6 +268,6 @@ def codec_args(tracks: list[AudioOutputTrack]) -> list[str]:
 
 def describe(tracks: list[AudioOutputTrack]) -> str:
     return ", ".join(
-        f"{t.title} ({'re-encode' if t.codec_arg == 'ac3' else 'copy'})"
+        f"{t.title} ({'copy' if t.codec_arg == 'copy' else 're-encode'})"
         for t in tracks
     )

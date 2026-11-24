@@ -202,13 +202,15 @@ Russian, otherwise English), or the first track if none matches.
 
 | Source track | Action |
 |---|---|
-| AC3 / EAC3 at 48 kHz | Stream copy |
-| AC3 / EAC3 **not** at 48 kHz | Re-encode to 48 kHz AC3 (44.1 kHz AC3 skips and loses sync on TVs after seeking) |
-| DTS / DTS-HD / TrueHD / stereo or mono AAC | Stream copy |
+| Stereo or mono AC3 / EAC3 | Re-encode to 48 kHz AAC (stereo AC3 skips and loses sync on TVs after seeking; stereo AAC plays correctly) |
+| 3+ channel AC3 / EAC3 at 48 kHz | Stream copy |
+| 3+ channel AC3 / EAC3 **not** at 48 kHz | Re-encode to 48 kHz AC3 (44.1 kHz AC3 skips and loses sync on TVs after seeking) |
+| DTS / DTS-HD / TrueHD / stereo or mono AAC and MP3 | Stream copy |
 | AAC / MP3 5.1+ | Re-encode to AC3 5.1 |
 
-AC3 tops out at 5.1, so 6.1/7.1 sources are downmixed when re-encoded. Surround
-AC3 is encoded at 640 kbps, stereo at 192 kbps.
+AC3 is only used for 3+ channels and tops out at 5.1, so 6.1/7.1 sources are
+downmixed when re-encoded. AC3 is encoded at 640 kbps; stereo AAC at 192 kbps and
+mono AAC at 128 kbps.
 
 Languages are resolved in this order: `--audio-lang`, then Whisper detection,
 then the source tag (`en` is normalised to `eng`; `und` means unknown). Tracks
@@ -226,7 +228,15 @@ The three behaviours (detect, drop other languages, AAC to AC3) are switches in
 `config.py` (`AUDIO_DETECT_LANG`, `AUDIO_DROP_OTHER`, `AUDIO_AAC_TO_AC3`), all on
 by default. Nothing needs to be passed on the command line.
 
-Run the tests with `python3 -m unittest tests.test_audio`.
+## Frame rate
+
+Output video is always 23.976 (24000/1001) or 29.97 (30000/1001) fps. A source
+already at one of those is left alone; any other rate (23.08, 24, 25, 50, 59.94,
+60 ...) is converted to the closer of the two with ffmpeg's `fps` filter, which
+adds or drops frames. Duration and audio sync do not change. The conversion
+prints the change (`Frame rate: 25.000 -> 23.976 fps`).
+
+Run the tests with `python3 -m unittest tests.test_audio tests.test_framerate`.
 
 ---
 
@@ -279,7 +289,8 @@ caffeinate -i python3 main.py convert
 main.py          -- CLI entry point (scan, convert, status, report)
 scanner.py       -- walks source directory and populates the database
 converter.py     -- ffmpeg command builder, probe pass, and full encode
-audio.py         -- audio track planning: 48 kHz rule, titles, languages, default track
+audio.py         -- audio track planning: AAC stereo / 48 kHz AC3 rules, titles, languages, default track
+framerate.py     -- output frame rate: snap to 23.976 or 29.97 fps
 langdetect.py    -- optional Whisper audio language detection
 tests/           -- unit tests for audio planning
 verify.py        -- post-conversion output verification

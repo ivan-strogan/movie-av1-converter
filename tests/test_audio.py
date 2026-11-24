@@ -36,9 +36,35 @@ class TestPlan(unittest.TestCase):
         self.assertEqual(t.codec_arg, "copy")
         self.assertEqual(t.title, "English DD 5.1")
 
-    def test_441_stereo_eac3_uses_stereo_bitrate(self):
-        t = plan([stream(1, "eac3", 2, 44100, "eng")])[0]
-        self.assertEqual((t.codec_arg, t.bitrate_arg), ("ac3", "192k"))
+    def test_stereo_ac3_becomes_aac_whatever_the_rate(self):
+        for codec in ("ac3", "eac3"):
+            for rate in (44100, 48000):
+                t = plan([stream(1, codec, 2, rate, "eng")])[0]
+                self.assertEqual((t.codec_arg, t.bitrate_arg, t.out_channels),
+                                 ("aac", "192k", 2))
+                self.assertEqual(t.title, "English AAC 2.0")
+                args = audio.codec_args([t])
+                self.assertEqual(arg_after(args, "-c:a:0"), "aac")
+                self.assertEqual(arg_after(args, "-ar:a:0"), "48000")
+                self.assertEqual(arg_after(args, "-ac:a:0"), "2")
+
+    def test_mono_ac3_becomes_aac_at_lower_bitrate(self):
+        t = plan([stream(1, "ac3", 1, 48000, "eng")])[0]
+        self.assertEqual((t.codec_arg, t.bitrate_arg, t.out_channels), ("aac", "128k", 1))
+
+    def test_surround_ac3_stays_ac3(self):
+        for ch in (3, 4, 6):
+            self.assertEqual(plan([stream(1, "ac3", ch, 48000, "eng")])[0].codec_arg, "copy")
+            t = plan([stream(1, "ac3", ch, 44100, "eng")])[0]
+            self.assertEqual((t.codec_arg, t.bitrate_arg), ("ac3", "640k"))
+
+    def test_stereo_non_ac3_is_untouched(self):
+        for codec in ("aac", "mp3", "dts", "flac"):
+            self.assertEqual(plan([stream(1, codec, 2, 44100, "eng")])[0].codec_arg, "copy")
+
+    def test_describe_marks_aac_as_re_encode(self):
+        out = audio.describe(plan([stream(1, "ac3", 2, 48000, "eng")]))
+        self.assertEqual(out, "English AAC 2.0 (re-encode)")
 
     def test_71_resample_downmixes_to_51(self):
         t = plan([stream(1, "eac3", 8, 44100, "eng")])[0]
