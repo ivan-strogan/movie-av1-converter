@@ -100,7 +100,7 @@ def verify(input_path: Path, output_path: Path,
                     f"Audio stream {i} title: expected '{want.title}' "
                     f"got '{got_title}'"
                 )
-            if want.codec_arg == "ac3":
+            if want.codec_arg in ("ac3", "aac"):
                 rate = int(out_s.get("sample_rate") or 0)
                 if rate != config.AC3_SAMPLE_RATE:
                     return False, f"Audio stream {i} sample rate {rate}, expected {config.AC3_SAMPLE_RATE}"

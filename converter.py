@@ -24,6 +24,7 @@ from typing import Optional
 import audio
 import config
 import db
+import framerate
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -71,6 +72,8 @@ def convert(row, dry_run: bool = False, audio_lang: str = "",
 
     resolution    = (f"{_probe_video['width']}x{_probe_video['height']}"
                      if _probe_video.get("width") else "unknown")
+    src_fps       = framerate.source_rate(_probe_video)
+    fps_target    = framerate.target_rate(src_fps)
 
     if duration_secs > 0:
         bitrate_kbps = int((input_size * 8) / (duration_secs * 1000))
@@ -87,6 +90,7 @@ def convert(row, dry_run: bool = False, audio_lang: str = "",
         crf_override=crf,
         video_idx=video_idx,
         audio_tracks=audio_tracks,
+        fps_target=fps_target,
     )
 
     if dry_run:
@@ -115,6 +119,7 @@ def convert(row, dry_run: bool = False, audio_lang: str = "",
           f"{dur_min}min  "
           f"starting CRF={crf}",
           flush=True)
+    print(f"  Frame rate: {framerate.describe(src_fps, fps_target)}", flush=True)
 
     # ── Probe-encode a 10-min sample to tune CRF before full encode ───────
     # Only worth doing for files longer than 20 minutes.
@@ -132,6 +137,7 @@ def convert(row, dry_run: bool = False, audio_lang: str = "",
         crf_override=crf,
         video_idx=video_idx,
         audio_tracks=audio_tracks,
+        fps_target=fps_target,
     )
 
     print(f"  Encoding full movie  CRF={crf}", flush=True)
@@ -213,6 +219,7 @@ def _build_command(
     crf_override: int = 0,
     video_idx: int = 0,                       # video-stream-relative index
     audio_tracks: Optional[list[audio.AudioOutputTrack]] = None,
+    fps_target: Optional[str] = None,         # e.g. '24000/1001'; None = keep source rate
 ) -> list[str]:
 
     cmd = [config.FFMPEG_BIN, "-hide_banner", "-loglevel", "warning",
@@ -240,8 +247,9 @@ def _build_command(
         "-preset", str(config.PRESET),
         "-svtav1-params", config.SVTAV1_PARAMS,
     ]
+    cmd += framerate.filter_args(fps_target)
 
-    # ── Audio: per-track copy / 48 kHz AC3, language, title, default ──────
+    # ── Audio: per-track copy / 48 kHz AC3 or AAC, language, title, default ─
     cmd += audio.codec_args(audio_tracks or [])
 
     # ── Subtitles ─────────────────────────────────────────────────────────

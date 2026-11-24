@@ -159,8 +159,13 @@ LANG_MAP = {
 # AC3/EAC3 must be 48 kHz: TVs/receivers glitch on 44.1 kHz AC3 (audio skips
 # and loses sync after seeking). Anything else is re-encoded to 48 kHz AC3.
 AC3_SAMPLE_RATE    = 48000
-AC3_BITRATE        = "640k"   # surround (5.0 and up)
-AC3_STEREO_BITRATE = "192k"   # stereo/mono re-encodes
+AC3_BITRATE        = "640k"   # surround (5.0 and up) and 3.0 / 4.0
+
+# Stereo and mono are AAC, not AC3: stereo AC3 skips and loses sync after
+# seeking on TVs, stereo AAC plays correctly. AC3 is only for 3+ channels.
+AAC_SAMPLE_RATE    = AC3_SAMPLE_RATE
+AAC_STEREO_BITRATE = "192k"
+AAC_MONO_BITRATE   = "128k"
 
 # Audio pipeline switches (all on = same behaviour as movie-standardizer).
 AUDIO_DETECT_LANG = True   # Whisper decides each track's language (needs faster-whisper + numpy;
